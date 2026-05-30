@@ -1,0 +1,11 @@
+[Unit]
+Description = boot_init daemon
+After=getty.target serial-getty@ttyFIQ0.service
+
+[Service]
+ExecStart = /usr/local/boot_init.sh 
+Type = idle
+
+
+[Install]
+WantedBy = multi-user.target
