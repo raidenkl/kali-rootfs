@@ -1,0 +1,14 @@
+[Unit]
+Description=Install linux-image deb on first boot
+ConditionPathExists=!/boot/.linux-image-installed
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=dpkg -i /usr/local/linux-image.deb
+ExecStart=touch /boot/.linux-image-installed
+ExecStartPost=systemctl disable kernel-install.service
+RemainAfterExit=yes
+
+[Install]
+WantedBy=local-fs.target

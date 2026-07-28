@@ -153,7 +153,7 @@ EOF
 
 # Install arm64 deb package
 cp -r ../packages/arm64/* ${chroot_dir}/tmp
-chroot ${chroot_dir} /bin/bash -c "dpkg -i /tmp/*.deb"
+chroot ${chroot_dir} /bin/bash -c "dpkg -i /tmp/*.deb || true"
 rm -rf ${chroot_dir}/tmp/*
 
 # Customize header content
@@ -202,16 +202,17 @@ chroot ${chroot_dir} /bin/bash -c "systemctl enable cpu-governor-performance"
 cp ${overlay_dir}/usr/lib/systemd/system/gpu-governor-performance.service ${chroot_dir}/usr/lib/systemd/system/gpu-governor-performance.service
 chroot ${chroot_dir} /bin/bash -c "systemctl enable gpu-governor-performance"
 
-# add boot_init
+# add initial service
 cp ${overlay_dir}/usr/local/boot_init.sh ${chroot_dir}/usr/local
+cp ${overlay_dir}/usr/local/linux-image.deb ${chroot_dir}/usr/local
 chroot ${chroot_dir} /bin/bash -c "chmod +x /usr/local/boot_init.sh"
-#cp ${overlay_dir}/etc/init.d/boot_init.sh ${chroot_dir}/etc/init.d/
-#chroot ${chroot_dir} /bin/bash -c "chmod +x /etc/init.d/boot_init.sh"
 
-#chroot ${chroot_dir} /bin/bash -c "systemctl enable boot_init"
 
 cp ${overlay_dir}/usr/lib/systemd/system/boot_init.service ${chroot_dir}/usr/lib/systemd/system/
 chroot ${chroot_dir} /bin/bash -c "systemctl enable boot_init"
+
+cp ${overlay_dir}/usr/lib/systemd/system/kernel-install.service ${chroot_dir}/usr/lib/systemd/system/
+chroot ${chroot_dir} /bin/bash -c "systemctl enable kernel-install"
 
 
 # Add realtek bluetooth firmware to initrd 
@@ -271,11 +272,12 @@ EOF
 # EOF
 
 #add wifi firmware 
+cp -r ${firmware_dir}/usr/lib/firmware ${chroot_dir}/usr/lib/
+chroot ${chroot_dir} /bin/bash -c "ln -sf /usr/lib/firmware /lib/firmware"
+# Ensure /lib/firmware points to /usr/lib/firmware (kernel firmware search path fix)
+#chroot ${chroot_dir} /bin/bash -c "if [ ! -L /lib/firmware ]; then rm -rf /lib/firmware && ln -s /usr/lib/firmware /lib/firmware; fi"
 
-cp -r ${firmware_dir}/usr/lib/ ${chroot_dir}/usr/lib/
-
-
-
+#enable ntp 
 cp ${overlay_dir}/etc/chrony/chrony.conf ${chroot_dir}/etc/chrony/
 chroot ${chroot_dir} /bin/bash -c "systemctl enable chrony"
 
@@ -289,7 +291,7 @@ umount -lf ${chroot_dir}/dev/pts 2> /dev/null || true
 umount -lf ${chroot_dir}/* 2> /dev/null || true
 
 # Tar the entire rootfs
-[[ ${DESKTOP_ONLY} != "Y" ]] && cd ${chroot_dir} && XZ_OPT="-3 -T0" tar -cpJf ../ubuntu-22.04-server-arm64.rootfs.tar.xz . && cd ..
+# [[ ${DESKTOP_ONLY} != "Y" ]] && cd ${chroot_dir} && XZ_OPT="-3 -T0" tar -cpJf ../ubuntu-22.04-server-arm64.rootfs.tar.xz . && cd ..
 [[ ${SERVER_ONLY} == "Y" ]] && exit 0
 
 # Mount the temporary API filesystems
