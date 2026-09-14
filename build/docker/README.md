@@ -363,6 +363,19 @@ sudo dd if=build/rootfs.img of=/dev/mmcblk0pX bs=1M status=progress conv=fsync
 > 清华/东软等镜像，存在整段 IP 被 403 屏蔽、或镜像站 DNS 解析失败的情况，
 > 会直接导致 `docker build` 失败（真实案例见根 README 2.9）。
 > 阿里云源对国内稳定；CI 传 build-arg 切回官方源即可，两边各用最快的。
+>
+> **★ 换源时必须连 deb822 文件一起处理**：Kali 2026.2 起 APT 源放在
+> `/etc/apt/sources.list.d/kali.sources`（deb822 格式），而 `/etc/apt/sources.list`
+> 在新镜像里**已不存在**。只 `echo > /etc/apt/sources.list` 只是**新增**一份定义，
+> 基础镜像自带的 `kali.sources`（`URIs: http://http.kali.org/kali/`）照旧生效，
+> apt 两个源都读 —— 表现就是「明明换了阿里云，构建还是去访问清华源」。
+> Dockerfile 的做法是：`rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.sources
+> /etc/apt/sources.list.d/*.list` 之后，再按 deb822 格式写阿里云。
+>
+> **rootfs 阶段不受影响**：debootstrap 写的是传统 `sources.list`（已核实 Kali 版
+> debootstrap 1.0.144 不生成 deb822 文件），且 `build-rootfs.sh` 第 62-66 行会把
+> 它整份覆写成 `${mirror}`（阿里云）。`base-files` / `kali-archive-keyring` /
+> `kali-defaults` 三个包也都不携带 `kali.sources`。
 
 ### 7.3 swapfile 占 2GB
 
