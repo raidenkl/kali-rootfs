@@ -42,20 +42,38 @@ echo "    仓库      : $REPO"
 echo "    板卡      : $BOARD"
 echo "    内核      : $(uname -r) / $(uname -m)"
 
-# --- binfmt 检查（关键）------------------------------------------------------
-#  容器是 x86_64，而 debootstrap 的第二阶段要执行 arm64 的 apt/dpkg。
-#  这依赖宿主机注册的 qemu-aarch64 binfmt。binfmt_misc 是跨 namespace 全局
-#  共享的，所以只要宿主注册过（带 F 标志），容器内无需额外权限即可使用。
+# --- binfmt 检查（仅交叉构建需要）---------------------------------------------
+#  ★ 判据必须用【容器自身】架构，不能无条件检查。
 #
-#  如果没注册，后面的 chroot 会报 "Exec format error" —— 那个报错对使用者
-#  毫无提示作用，所以这里提前检查并给出明确的修复指引。
-if [ ! -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
-    cat >&2 <<'EOF'
+#  为什么：build-rootfs.sh 第 50 行按 `[ -f /usr/bin/qemu-aarch64-static ]`
+#  分流两条路径：
+#
+#    容器是 x86_64 → 镜像里装了 qemu-user-static（amd64 版），
+#                     /usr/bin/qemu-aarch64-static 存在
+#                     → 走 --foreign + chroot second-stage，**需要 binfmt**
+#
+#    容器是 arm64  → 镜像里装的是 qemu-user-static 的 arm64 版，
+#                     它不提供 /usr/bin/qemu-aarch64-static
+#                     → 走原生 debootstrap，**完全不需要 binfmt**
+#
+#  所以 arm64 runner 上 /proc/sys/fs/binfmt_misc/qemu-aarch64 不存在是
+#  **正常现象**，早期版本在这里无条件报错退出，导致 arm64 腿必然失败。
+#
+#  binfmt_misc 是跨 namespace 全局共享的，只要宿主注册过（带 F 标志），
+#  容器内无需额外权限即可使用 —— 所以检查看的是宿主注册状态。
+CONTAINER_ARCH="$(uname -m)"
+case "$CONTAINER_ARCH" in
+    aarch64|arm64)
+        echo "    binfmt    : 原生 arm64，无需 qemu（build-rootfs.sh 走 else 分支）"
+        ;;
+    *)
+        if [ ! -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
+            cat >&2 <<EOF
 
-ERROR: 宿主机的 qemu-aarch64 binfmt 未注册。
+ERROR: 交叉构建需要宿主机注册 qemu-aarch64 binfmt，但未注册。
 
-  容器是 x86_64 架构，而 kali rootfs 是 arm64，debootstrap 的第二阶段
-  需要在 chroot 内执行 arm64 的 apt/dpkg，这依赖 qemu 用户态模拟。
+  容器是 ${CONTAINER_ARCH} 架构，而 kali rootfs 是 arm64，debootstrap 的
+  第二阶段需要在 chroot 内执行 arm64 的 apt/dpkg，这依赖 qemu 用户态模拟。
 
   请在【宿主机】（不是容器内）执行以下任一种：
 
@@ -71,9 +89,11 @@ ERROR: 宿主机的 qemu-aarch64 binfmt 未注册。
          cat /proc/sys/fs/binfmt_misc/qemu-aarch64    # 应输出 enabled
 
 EOF
-    exit 1
-fi
-echo "    binfmt    : qemu-aarch64 已注册"
+            exit 1
+        fi
+        echo "    binfmt    : qemu-aarch64 已注册（交叉构建模式）"
+        ;;
+esac
 
 # --- 磁盘空间检查 ------------------------------------------------------------
 #  峰值需求：rootfs 目录树 + rootfs.img 在 mkfs.ext4 -d 期间并存
