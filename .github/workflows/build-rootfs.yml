@@ -217,8 +217,11 @@ jobs:
         run: |
           set -o pipefail
           echo ">>> docker build（宿主架构 $(uname -m)）"
+          # APT_MIRROR：runner 在海外，覆盖回 kali 官方 GeoIP 源（本地默认阿里云，
+          # 见 Dockerfile 的 APT_MIRROR 注释 —— 两边各用最快的源）
           docker build \
             --file Dockerfile \
+            --build-arg APT_MIRROR=https://http.kali.org/kali \
             --tag "${IMAGE_TAG}" \
             --progress plain \
             . 2>&1 | tee /tmp/docker-build.log

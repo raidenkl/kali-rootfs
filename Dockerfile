@@ -29,6 +29,40 @@ ENV DEBIAN_FRONTEND=noninteractive \
     APT_KEY_DONT_WARN_ON_DANGEROUS_USAGE=1
 
 # -----------------------------------------------------------------------------
+#  APT 镜像源（可用 --build-arg 覆盖）
+# -----------------------------------------------------------------------------
+#  基础镜像的源是 http.kali.org —— 一个 GeoIP 重定向服务，国内会被分到
+#  清华/东软等教育网镜像。部分网络会被镜像站 403（IP 段屏蔽）或解析失败，
+#  导致 docker build 阶段 apt-get install 直接挂掉。
+#
+#  默认改用阿里云源（https，走 443 不易被缓存劫持）。海外构建（如 GitHub
+#  Actions）可覆盖回官方源：
+#      docker build --build-arg APT_MIRROR=https://http.kali.org/kali .
+#
+#  注意：这层镜像里的 apt 源**只影响 docker build 阶段装依赖**；
+#  rootfs 内的源由 build-rootfs.sh 第 37 行的 mirror= 变量决定（也是阿里云），
+#  两者相互独立。
+#
+#  换源的两个细节（踩过 403 坑）：
+#    1) kali-rolling 底包里没有 ca-certificates，https 源在装上它之前用不了。
+#       所以第一遍 update 用 http + [trusted=yes] 保底（只装 ca-certificates，
+#       面极小），第二遍再切到正式源（默认 ${APT_MIRROR}，https）。
+#    2) 若覆盖 APT_MIRROR 为海外源（GitHub Actions 场景），上面两遍依旧成立，
+#       http 那遍只是多花几秒。
+# -----------------------------------------------------------------------------
+ARG APT_MIRROR=https://mirrors.aliyun.com/kali
+
+RUN set -eux; \
+    echo "deb [trusted=yes] http://mirrors.aliyun.com/kali kali-rolling main contrib non-free non-free-firmware" \
+        > /etc/apt/sources.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates; \
+    echo "deb ${APT_MIRROR} kali-rolling main contrib non-free non-free-firmware" \
+        > /etc/apt/sources.list; \
+    rm -rf /var/lib/apt/lists/*; \
+    apt-get update
+
+# -----------------------------------------------------------------------------
 #  依赖清单
 # -----------------------------------------------------------------------------
 #  这份清单是从「既有的两个脚本实际调用了什么」反推出来的，
@@ -86,7 +120,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #    架构差异：arm64 容器不需要 qemu（原生执行），跳过可省 60MB+。
 # -----------------------------------------------------------------------------
 RUN set -eux; \
-    apt-get update; \
     apt-get install -y --no-install-recommends \
         debootstrap \
         util-linux mount e2fsprogs sudo \
@@ -99,6 +132,7 @@ RUN set -eux; \
         udev uuid-runtime git git-lfs \
         python3 python3-minimal python-is-python3 \
         wget curl ca-certificates file procps; \
+    echo ">>> 生效的 apt 源: $(cat /etc/apt/sources.list)"; \
     if [ "$(uname -m)" = "x86_64" ] || [ "$(uname -m)" = "amd64" ]; then \
         echo ">>> x86_64 宿主：安装 qemu-user（静态，交叉构建 arm64 所需）"; \
         apt-get install -y --no-install-recommends qemu-user qemu-user-binfmt; \

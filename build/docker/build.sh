@@ -23,7 +23,13 @@ trap 'echo "Error: in $0 on line $LINENO" >&2' ERR
 
 # ------------------------------- 可调参数 -----------------------------------
 IMAGE="${IMAGE:-kali-rootfs-builder}"
-PLATFORM="${PLATFORM:-linux/amd64}"
+# PLATFORM 默认按宿主机架构自动推导，避免在 arm64 机器上误用 x86_64 镜像
+# （退化成模拟运行，慢好几倍）。仍可显式覆盖：PLATFORM=linux/amd64 bash build.sh
+case "$(uname -m)" in
+    aarch64|arm64) DEFAULT_PLATFORM="linux/arm64" ;;
+    *)             DEFAULT_PLATFORM="linux/amd64" ;;
+esac
+PLATFORM="${PLATFORM:-${DEFAULT_PLATFORM}}"
 REBUILD="${REBUILD:-1}"
 BOARD="${BOARD:-lubancat-4}"
 FORCE_REBUILD="${FORCE_REBUILD:-0}"
@@ -70,6 +76,7 @@ fi
 echo "==============================================================="
 echo " Kali rootfs 薄容器构建"
 echo "   镜像     : ${IMAGE}"
+echo "   平台     : ${PLATFORM}（宿主 $(uname -m)，可覆盖 PLATFORM）"
 echo "   板卡     : ${BOARD}"
 echo "   重建镜像 : ${REBUILD}"
 echo "   强制重建 : ${FORCE_REBUILD}"

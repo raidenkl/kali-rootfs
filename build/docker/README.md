@@ -352,7 +352,17 @@ sudo dd if=build/rootfs.img of=/dev/mmcblk0pX bs=1M status=progress conv=fsync
 | debootstrap + kali-linux-core + kali-desktop-xfce 下载安装 | 40~90 分钟 |
 | `mkfs.ext4 -d` + `resize2fs -M` | 5~15 分钟 |
 
-镜像源是 `mirrors.aliyun.com/kali/`（`build-rootfs.sh` 第 34 行），国内速度尚可。
+镜像源分两层，互不相干：
+
+| 层 | 源 | 谁决定 | 覆盖方式 |
+|---|---|---|---|
+| **镜像构建期**（Dockerfile 里 apt 装依赖） | 默认阿里云 `mirrors.aliyun.com/kali` | Dockerfile 的 `ARG APT_MIRROR` | `docker build --build-arg APT_MIRROR=https://http.kali.org/kali .`（CI 海外用这个） |
+| **rootfs 构建期**（debootstrap + chroot 内 apt） | 阿里云 `mirrors.aliyun.com/kali/` | `build-rootfs.sh` 第 37 行 `mirror=` 变量 | 改脚本或挂载后 sed（国内速度尚可；海外慢） |
+
+> 为什么镜像构建期不直接用 `http.kali.org`：它是 GeoIP 重定向，国内可能被分到
+> 清华/东软等镜像，存在整段 IP 被 403 屏蔽、或镜像站 DNS 解析失败的情况，
+> 会直接导致 `docker build` 失败（真实案例见根 README 2.9）。
+> 阿里云源对国内稳定；CI 传 build-arg 切回官方源即可，两边各用最快的。
 
 ### 7.3 swapfile 占 2GB
 
