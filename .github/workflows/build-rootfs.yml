@@ -228,20 +228,30 @@ jobs:
             --format '大小: {{.Size}} bytes' || true
           echo ""
           echo "=== 确认 qemu 安装策略生效 ==="
+          # 注意：新版 Debian/Kali 里 qemu-user 自己就是静态的，二进制名不带
+          # -static 后缀；qemu-user-static 包已于 2026-01 被 Debian 删除
+          # （bug #1124747），装它不再创建 -static 软链。
+          # 镜像里已补建软链；这里做校验并打印诊断信息，便于定位。
           ARCH="$(uname -m)"
           if [ "${ARCH}" = "aarch64" ] || [ "${ARCH}" = "arm64" ]; then
             if docker run --rm --entrypoint sh "${IMAGE_TAG}" \
                  -c 'test -e /usr/bin/qemu-aarch64-static' 2>/dev/null; then
               echo "::warning::arm64 镜像里出现了 qemu-aarch64-static（不必要）"
             else
-              echo "OK: arm64 镜像未装 qemu-aarch64-static（符合预期）"
+              echo "OK: arm64 镜像未装 qemu（符合预期，原生执行）"
             fi
           else
+            echo "--- 镜像内 qemu 文件 ---"
+            docker run --rm --entrypoint sh "${IMAGE_TAG}" \
+              -c 'ls -l /usr/bin/qemu-aarch64* 2>&1 || true' || true
             if docker run --rm --entrypoint sh "${IMAGE_TAG}" \
                  -c 'test -x /usr/bin/qemu-aarch64-static' 2>/dev/null; then
               echo "OK: x86_64 镜像已备 qemu-aarch64-static（交叉构建必需）"
             else
-              echo "::error::x86_64 镜像缺少 qemu-aarch64-static，交叉构建会失败"
+              echo "::error::x86_64 镜像缺少 /usr/bin/qemu-aarch64-static"
+              echo "         build-rootfs.sh 第 50 行会因此改走原生分支，交叉构建可能异常。"
+              echo "         该文件应由 Dockerfile 补建的软链提供，请检查上面的构建日志中"
+              echo "         '>>> 补建 /usr/bin/qemu-aarch64-static' 那行的输出。"
               exit 1
             fi
           fi
