@@ -48,13 +48,8 @@ echo "    内核      : $(uname -r) / $(uname -m)"
 #  为什么：build-rootfs.sh 第 50 行按 `[ -f /usr/bin/qemu-aarch64-static ]`
 #  分流两条路径：
 #
-#    容器是 x86_64 → 镜像里装了 qemu-user-static（amd64 版），
-#                     /usr/bin/qemu-aarch64-static 存在
-#                     → 走 --foreign + chroot second-stage，**需要 binfmt**
-#
-#    容器是 arm64  → 镜像里装的是 qemu-user-static 的 arm64 版，
-#                     它不提供 /usr/bin/qemu-aarch64-static
-#                     → 走原生 debootstrap，**完全不需要 binfmt**
+#    容器是 x86_64 → 走 --foreign + chroot second-stage，**需要 binfmt**
+#    容器是 arm64  → 走原生 debootstrap，**完全不需要 binfmt**
 #
 #  所以 arm64 runner 上 /proc/sys/fs/binfmt_misc/qemu-aarch64 不存在是
 #  **正常现象**，早期版本在这里无条件报错退出，导致 arm64 腿必然失败。
@@ -67,6 +62,29 @@ case "$CONTAINER_ARCH" in
         echo "    binfmt    : 原生 arm64，无需 qemu（build-rootfs.sh 走 else 分支）"
         ;;
     *)
+        # --- 交叉构建前置 1/2：-static 别名（自愈，兼容新版 Debian/Kali）--------
+        #  build-rootfs.sh 第 50 行看的是 /usr/bin/qemu-aarch64-static，
+        #  但该文件名在现代 Debian/Kali 上已不存在：
+        #    ① qemu 1:9.1.0（2024-09）起 qemu-user 本身改为静态链接，
+        #       二进制名去掉了 -static 后缀（真身是 /usr/bin/qemu-aarch64）；
+        #    ② Debian #1124747（2026-01）删除了提供兼容软链的 qemu-user-static
+        #       包，改由 qemu-user-binfmt 的 Provides: 承接 ——
+        #       于是 apt 装得上，却**不再创建任何 -static 软链**。
+        #  不修的话第 50 行恒为假，会静默改走原生分支（与设计不符）。
+        #  这里就地补软链：目标是静态二进制，语义成立；第 54 行 cp 也照常可用。
+        if [ ! -e /usr/bin/qemu-aarch64-static ]; then
+            if [ -x /usr/bin/qemu-aarch64 ]; then
+                ln -sf /usr/bin/qemu-aarch64 /usr/bin/qemu-aarch64-static
+                echo "    qemu 别名 : 已补 /usr/bin/qemu-aarch64-static -> qemu-aarch64"
+            else
+                warn "容器内既无 /usr/bin/qemu-aarch64-static 也无 /usr/bin/qemu-aarch64"
+                warn "build-rootfs.sh 将改走原生分支；若 binfmt 已注册通常仍可完成构建"
+            fi
+        else
+            echo "    qemu 别名 : /usr/bin/qemu-aarch64-static 已就绪"
+        fi
+
+        # --- 交叉构建前置 2/2：宿主 binfmt 注册 --------------------------------
         if [ ! -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
             cat >&2 <<EOF
 
@@ -77,13 +95,13 @@ ERROR: 交叉构建需要宿主机注册 qemu-aarch64 binfmt，但未注册。
 
   请在【宿主机】（不是容器内）执行以下任一种：
 
-    A. 安装系统包（推荐，永久生效）
-         sudo apt-get install -y qemu-user-static binfmt-support
+    A. 用官方镜像一次性注册（最简单，推荐）
+         docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+
+    B. 安装系统包（永久生效；注意新版 Debian/Kali 已无 qemu-user-static 包）
+         sudo apt-get install -y qemu-user qemu-user-binfmt
          sudo systemctl restart systemd-binfmt
          # 或者： sudo update-binfmts --enable qemu-aarch64
-
-    B. 用官方镜像一次性注册（需要 --privileged）
-         docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
 
   验证：
          cat /proc/sys/fs/binfmt_misc/qemu-aarch64    # 应输出 enabled

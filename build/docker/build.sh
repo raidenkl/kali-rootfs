@@ -50,13 +50,16 @@ ERROR: 宿主机未注册 qemu-aarch64 binfmt，无法交叉构建 arm64 rootfs�
 
   请执行以下任一种：
 
-    A. 安装系统包（推荐）
-         sudo apt-get install -y qemu-user-static binfmt-support
+    A. 用官方镜像一次性注册（最简单，推荐）
+         docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+
+    B. 安装系统包（永久生效）
+         sudo apt-get install -y qemu-user qemu-user-binfmt
          sudo systemctl restart systemd-binfmt
          # 或： sudo update-binfmts --enable qemu-aarch64
 
-    B. 用官方镜像一次性注册
-         docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+       注意：新版 Debian/Kali 已删除 qemu-user-static 包（Debian #1124747），
+             现在应装 qemu-user + qemu-user-binfmt。
 
   验证：  cat /proc/sys/fs/binfmt_misc/qemu-aarch64
 

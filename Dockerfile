@@ -55,16 +55,34 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #  刻意不装的项：
 #    * python2 —— README 里列了它，但 kali-rolling 早已移除该包，
 #      照抄会让 apt-get install 直接失败。这是必须注意的差异。
-#    * binfmt-support / qemu-user-binfmt —— 这两个包靠 systemd 服务注册 binfmt，
-#      但 docker build 阶段服务不会启动（日志里可见 policy-rc.d denied），
-#      在本方案里从未生效，纯属无用依赖。
+#    * binfmt-support —— 靠 systemd 服务注册 binfmt，但 docker build 阶段
+#      服务不会启动（日志里可见 policy-rc.d denied），在本方案里从未生效。
 #
-#  ★ qemu-user-static 为什么按架构条件安装：
-#      build-rootfs.sh 第 50 行用 `[ -f /usr/bin/qemu-aarch64-static ]` 分流：
-#        x86_64 容器 → 装了 amd64 版 qemu-user-static，该文件存在 → 走交叉构建
-#        arm64  容器 → 装的是 arm64 版，**不提供** qemu-aarch64-static
-#                      → 自动走原生 debootstrap，不需要 qemu
-#      在 arm64 上强装还会白拉 63.8MB 的 arm64 qemu-user（日志 Get:149 可见）。
+#  ★★ qemu 的安装：一个必须处理的上游变更（否则交叉构建静默走错分支）
+#
+#    build-rootfs.sh 第 50 行用 `[ -f /usr/bin/qemu-aarch64-static ]` 决定路径：
+#        存在     → debootstrap --foreign + cp 进 chroot + second-stage（交叉）
+#        不存在   → debootstrap --arch arm64（原生）
+#
+#    但这个文件名在现代 Debian/Kali 上**已经不存在了**，原因是两步上游变更：
+#
+#      ① Debian qemu 1:9.1.0（2024-09）把静态二进制从 qemu-user-static
+#         搬到了 qemu-user（qemu-user 现在本身就是静态链接），
+#         并且**去掉了 -static 后缀** —— 真正的二进制叫 /usr/bin/qemu-aarch64。
+#         当时靠 qemu-user-static 这个 transitional 包提供 -static 兼容软链。
+#      ② Debian bug #1124747（2026-01）**直接删除了 qemu-user-static 包**，
+#         其职责由 qemu-user-binfmt 的 Provides: 承接 ——
+#         于是 `apt-get install qemu-user-static` 仍能成功，却**不再创建任何
+#         -static 软链**。
+#
+#    后果：若不处理，第 50 行判断恒为假，x86_64 上会**静默**改走原生分支，
+#    与脚本作者设计的 --foreign 交叉流程不符（且 cp 那步永不执行）。
+#
+#    对策：装 qemu-user（现在它就是静态的），并补建 -static 别名。
+#    因为是软链到**静态**二进制，语义上完全成立 —— 第 54 行 cp 进 chroot
+#    也依然可用，脚本零改动。
+#
+#    架构差异：arm64 容器不需要 qemu（原生执行），跳过可省 60MB+。
 # -----------------------------------------------------------------------------
 RUN set -eux; \
     apt-get update; \
@@ -81,10 +99,16 @@ RUN set -eux; \
         python3 python3-minimal python-is-python3 \
         wget curl ca-certificates file procps; \
     if [ "$(uname -m)" = "x86_64" ] || [ "$(uname -m)" = "amd64" ]; then \
-        echo ">>> x86_64 宿主：安装 qemu-user-static（交叉构建 arm64 所需）"; \
-        apt-get install -y --no-install-recommends qemu-user-static; \
+        echo ">>> x86_64 宿主：安装 qemu-user（静态，交叉构建 arm64 所需）"; \
+        apt-get install -y --no-install-recommends qemu-user qemu-user-binfmt; \
+        if [ ! -e /usr/bin/qemu-aarch64-static ]; then \
+            echo ">>> 补建 /usr/bin/qemu-aarch64-static -> qemu-aarch64（见上方 ★★ 说明）"; \
+            ln -sf /usr/bin/qemu-aarch64 /usr/bin/qemu-aarch64-static; \
+        fi; \
+        ls -l /usr/bin/qemu-aarch64 /usr/bin/qemu-aarch64-static || true; \
+        test -x /usr/bin/qemu-aarch64-static; \
     else \
-        echo ">>> $(uname -m) 宿主：原生执行，跳过 qemu-user-static（省 60MB+）"; \
+        echo ">>> $(uname -m) 宿主：原生执行，跳过 qemu（省 60MB+）"; \
     fi; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb

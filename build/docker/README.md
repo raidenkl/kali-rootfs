@@ -31,26 +31,37 @@
 当容器是 x86_64 时，rootfs 是 arm64，debootstrap 第二阶段要在 chroot 内执行 arm64 的 `apt`/`dpkg`，依赖 qemu 用户态模拟：
 
 ```bash
-# 方法 A：安装系统包（推荐，永久生效）
-sudo apt-get install -y qemu-user-static binfmt-support
-sudo systemctl restart systemd-binfmt
-
-# 方法 B：用官方镜像一次性注册
+# 方法 A：用官方镜像一次性注册（最简单，推荐）
 docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+
+# 方法 B：安装系统包（永久生效）
+sudo apt-get install -y qemu-user qemu-user-binfmt
+sudo systemctl restart systemd-binfmt
 
 # 验证（必须输出 enabled）
 cat /proc/sys/fs/binfmt_misc/qemu-aarch64
 ```
 
+> ⚠ **注意包名**：新版 Debian/Kali 已**删除 `qemu-user-static` 包**（Debian bug #1124747，2026-01），
+> 现在应装 `qemu-user` + `qemu-user-binfmt`。老教程里的 `qemu-user-static binfmt-support`
+> 虽然有时还能装上（被 `Provides:` 满足），但行为已变 —— 详见下方。
+
 > `binfmt_misc` 是全局跨 namespace 共享的。只要**宿主**注册过（带 `F` 标志），容器内无需任何额外权限即可执行 arm64 二进制。所以这一步不需要给容器 binfmt 权限。
 
-**为什么 arm64 宿主不需要**：`build-rootfs.sh` 第 50 行按「有没有 `/usr/bin/qemu-aarch64-static`」分流 —— 这个二进制是 **x86_64 独有**的（arm64 版 `qemu-user-static` 不提供它）。
-所以：
+**为什么 arm64 宿主不需要**：`build-rootfs.sh` 第 50 行按「有没有 `/usr/bin/qemu-aarch64-static`」分流。这个文件名在现代 Debian/Kali 上**已不再由任何包提供**：
+
+| 时间 | 上游变更 |
+|---|---|
+| 2024-09，qemu 1:9.1.0 | 静态二进制从 `qemu-user-static` 搬到 `qemu-user`（后者现在本身就是静态链接），**去掉 `-static` 后缀** —— 真身是 `/usr/bin/qemu-aarch64`；过渡期由 transitional 包提供兼容软链 |
+| 2026-01，Debian #1124747 | **`qemu-user-static` 包被整体删除**，职责由 `qemu-user-binfmt` 的 `Provides:` 承接 → 装得上，但**不再创建 `-static` 软链** |
+
+若不处理，第 50 行判断恒为假，x86_64 上会**静默**改走原生分支。
+本方案的容器在 x86_64 上装 `qemu-user` 并**补建软链** `/usr/bin/qemu-aarch64-static → qemu-aarch64`（Dockerfile 里一处、`entrypoint.sh` 里再自愈一次），脚本零改动。
 
 | 宿主架构 | `/usr/bin/qemu-aarch64-static` | 走哪条路 | 需要 binfmt？ |
 |---|---|---|---|
-| x86_64 | 存在 | `debootstrap --foreign` + chroot | **是** |
-| arm64 | 不存在 | 原生 `debootstrap` | **否** |
+| x86_64 | 由 Dockerfile/entrypoint 补建 | `debootstrap --foreign` + chroot | **是** |
+| arm64 | 不存在（不装 qemu，原生执行） | 原生 `debootstrap` | **否** |
 
 `entrypoint.sh` 会按**容器自身架构**（`uname -m`）判断，只在交叉构建时才要求 binfmt。
 

@@ -98,7 +98,7 @@ GitHub 仓库 → Actions → Build Kali Rootfs → Run workflow，可填：
 
 矩阵配了 `fail-fast: false`，一个失败不影响另一个 —— 这样能同时看到两边的结果。
 
-### ★ 一个容易踩的坑：qemu 是按架构条件安装的
+### ★ 一个容易踩的坑：qemu 的 `-static` 名字已经不在了
 
 `build-rootfs.sh` 第 50 行按「有没有 `/usr/bin/qemu-aarch64-static`」分流：
 
@@ -111,15 +111,21 @@ else
 fi
 ```
 
-这意味着 Dockerfile 里 **不能无条件安装 `qemu-user-static`**：
+**这个文件名在现代 Debian/Kali 上已经不存在了**，原因是两步上游变更：
 
-| 宿主架构 | `qemu-user-static` 装到 | `/usr/bin/qemu-aarch64-static` | 走哪条路 |
+| 时间 | 变更 |
+|---|---|
+| 2024-09<br>qemu 1:9.1.0 | 静态二进制从 `qemu-user-static` **搬到了 `qemu-user`**（`qemu-user` 现在本身就是静态链接），且**去掉了 `-static` 后缀** —— 真身是 `/usr/bin/qemu-aarch64`。当时靠 transitional 包提供 `-static` 兼容软链 |
+| 2026-01<br>Debian #1124747 | **`qemu-user-static` 包被整体删除**，职责由 `qemu-user-binfmt` 的 `Provides:` 承接 |
+
+后果：`apt-get install qemu-user-static` **仍然会成功**（被 Provides 满足），但**不再创建任何 `-static` 软链**。于是第 50 行判断恒为假，x86_64 上会**静默**改走原生分支 —— 与脚本设计的 `--foreign` 交叉流程不符。
+
+**本仓库的对策**：Dockerfile 在 x86_64 上装 `qemu-user`（现在它就是静态的），并**补建软链** `/usr/bin/qemu-aarch64-static → qemu-aarch64`。因为是软链到静态二进制，语义成立；`entrypoint.sh` 里还有一层运行时自愈，所以本地 docker 与 CI 都覆盖到，且脚本零改动。
+
+| 宿主架构 | `qemu-user` 装到 | `/usr/bin/qemu-aarch64-static` | 走哪条路 |
 |---|---|---|---|
-| x86_64 | amd64 版 | **存在** | 交叉 ✅ |
-| arm64 | arm64 版 | **不存在** | 原生 ✅（并在 arm64 上白拉 63.8MB） |
-
-所以本仓库的 Dockerfile 用 `if [ "$(uname -m)" = "x86_64" ]` 条件安装 ——
-arm64 上既省了 60MB+，又避免误导。
+| x86_64 | amd64 版 | 由 Dockerfile/entrypoint 补建 | 交叉 ✅ |
+| arm64 | **不装**（原生执行，省 60MB+） | 不存在（正常） | 原生 ✅ |
 
 > **历史 bug（已修）**：早期版本的 `entrypoint.sh` **无条件**检查
 > `/proc/sys/fs/binfmt_misc/qemu-aarch64`，导致 arm64 runner 上必然报错退出
@@ -195,7 +201,8 @@ docker run --rm \
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | `No space left on device` | 清理步骤没生效 | 检查第 1 步输出，确认释放后可用 >20GB |
-| **arm64 腿报「qemu-aarch64 binfmt 未注册」** | **entrypoint 旧版无条件检查 binfmt** | **已在 555468c 之后修复：改为按容器架构判断** |
+| **arm64 腿报「qemu-aarch64 binfmt 未注册」** | **entrypoint 旧版无条件检查 binfmt** | **已修：改为按容器架构判断** |
+| **x86_64 腿报「镜像缺少 qemu-aarch64-static」** | **Debian 2026-01 删除了 `qemu-user-static` 包，不再创建 `-static` 软链** | **已修：Dockerfile/entrypoint 补建软链指向静态的 `qemu-aarch64`** |
 | `Exec format error` | x86_64 上 binfmt 未注册 | 检查第 4 步，`/proc/sys/fs/binfmt_misc/qemu-aarch64` 应存在 |
 | `/dev` 条目数告警 | 挂载残留 | 看 entrypoint.sh 的 `umount`/`findmnt` 逻辑 |
 | board hook 不生效 | `config_image_hook__` 未补调 | 看日志里 `执行 hook : config_image_hook__lubancat-4` 那行 |
