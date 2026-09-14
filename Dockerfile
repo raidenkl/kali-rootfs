@@ -35,32 +35,53 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #  清华/东软等教育网镜像。部分网络会被镜像站 403（IP 段屏蔽）或解析失败，
 #  导致 docker build 阶段 apt-get install 直接挂掉。
 #
-#  默认改用阿里云源（https，走 443 不易被缓存劫持）。海外构建（如 GitHub
-#  Actions）可覆盖回官方源：
+#  默认改用阿里云源。海外构建（如 GitHub Actions）可覆盖回官方源：
 #      docker build --build-arg APT_MIRROR=https://http.kali.org/kali .
+#
+#  ★★ 为什么不能只写 /etc/apt/sources.list（踩过两次的坑）
+#
+#    Kali 2026.2 起，APT 源改为 **deb822 格式**，存放在
+#        /etc/apt/sources.list.d/kali.sources
+#    而旧的 /etc/apt/sources.list 在官方镜像/新装系统里**根本不存在**。
+#
+#    如果只做 `echo ... > /etc/apt/sources.list`：
+#      * 那只是**新增**了一个源文件；
+#      * 基础镜像自带的 kali.sources（URIs: http://http.kali.org/kali/）
+#        依然生效 —— apt 会把两个源都读进来；
+#      * 国内的 GeoIP 会把它指到清华/东软，IP 段一旦被屏蔽就是
+#        403 Forbidden，`apt-get update` 直接失败。
+#    → 表现就是「明明改了阿里云源，构建还是去访问清华源」。
+#
+#    所以**必须先把 sources.list.d 里的既有定义删掉**，再写自己的。
+#
+#  换源的两个细节：
+#    1) kali-rolling 底包里没有 ca-certificates，https 源在装上它之前用不了。
+#       所以第一遍 update 用 **http** 保底（只装 ca-certificates，面极小），
+#       第二遍再切到正式源（默认 ${APT_MIRROR}，https）。
+#       http 传输不降低安全性 —— 源元数据仍有 Signed-By 签名校验。
+#    2) Signed-By 指向镜像自带的 kali-archive-keyring；万一该 keyring 不存在，
+#       退化为 Trusted: yes（仍然可用，但跳过签名校验）。
 #
 #  注意：这层镜像里的 apt 源**只影响 docker build 阶段装依赖**；
 #  rootfs 内的源由 build-rootfs.sh 第 37 行的 mirror= 变量决定（也是阿里云），
-#  两者相互独立。
-#
-#  换源的两个细节（踩过 403 坑）：
-#    1) kali-rolling 底包里没有 ca-certificates，https 源在装上它之前用不了。
-#       所以第一遍 update 用 http + [trusted=yes] 保底（只装 ca-certificates，
-#       面极小），第二遍再切到正式源（默认 ${APT_MIRROR}，https）。
-#    2) 若覆盖 APT_MIRROR 为海外源（GitHub Actions 场景），上面两遍依旧成立，
-#       http 那遍只是多花几秒。
+#  debootstrap 生成的传统 sources.list 会被该脚本整份覆写，两者相互独立。
 # -----------------------------------------------------------------------------
 ARG APT_MIRROR=https://mirrors.aliyun.com/kali
 
 RUN set -eux; \
-    echo "deb [trusted=yes] http://mirrors.aliyun.com/kali kali-rolling main contrib non-free non-free-firmware" \
-        > /etc/apt/sources.list; \
+    rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; \
+    KEYRING=/usr/share/keyrings/kali-archive-keyring.gpg; \
+    if [ -f "$KEYRING" ]; then SIGNED="Signed-By: $KEYRING"; else SIGNED="Trusted: yes"; fi; \
+    printf 'Types: deb\nURIs: http://mirrors.aliyun.com/kali\nSuites: kali-rolling\nComponents: main contrib non-free non-free-firmware\n%s\n' "$SIGNED" \
+        > /etc/apt/sources.list.d/kali.sources; \
     apt-get update; \
     apt-get install -y --no-install-recommends ca-certificates; \
-    echo "deb ${APT_MIRROR} kali-rolling main contrib non-free non-free-firmware" \
-        > /etc/apt/sources.list; \
+    printf 'Types: deb\nURIs: %s\nSuites: kali-rolling\nComponents: main contrib non-free non-free-firmware\n%s\n' "$APT_MIRROR" "$SIGNED" \
+        > /etc/apt/sources.list.d/kali.sources; \
     rm -rf /var/lib/apt/lists/*; \
-    apt-get update
+    apt-get update; \
+    echo ">>> 生效的 apt 源:"; \
+    cat /etc/apt/sources.list.d/kali.sources
 
 # -----------------------------------------------------------------------------
 #  依赖清单
@@ -132,7 +153,8 @@ RUN set -eux; \
         udev uuid-runtime git git-lfs \
         python3 python3-minimal python-is-python3 \
         wget curl ca-certificates file procps; \
-    echo ">>> 生效的 apt 源: $(cat /etc/apt/sources.list)"; \
+    echo ">>> 生效的 apt 源:"; \
+    cat /etc/apt/sources.list.d/kali.sources; \
     if [ "$(uname -m)" = "x86_64" ] || [ "$(uname -m)" = "amd64" ]; then \
         echo ">>> x86_64 宿主：安装 qemu-user（静态，交叉构建 arm64 所需）"; \
         apt-get install -y --no-install-recommends qemu-user qemu-user-binfmt; \

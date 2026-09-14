@@ -59,7 +59,7 @@ build/mk-image.sh         ->   build/rootfs.img     # 最终产物
 | 项 | 内容 |
 |---|---|
 | 基础镜像 | `kalilinux/kali-rolling` |
-| APT 源 | 默认阿里云（`--build-arg APT_MIRROR=...` 可覆盖），规避 `http.kali.org` GeoIP 分流到不可用镜像的问题 |
+| APT 源 | 默认阿里云（`--build-arg APT_MIRROR=...` 可覆盖）。写入 deb822 格式的 `/etc/apt/sources.list.d/kali.sources`，并**先清掉基础镜像自带的同名文件**，规避 `http.kali.org` GeoIP 分流到不可用镜像的问题 |
 | 安装的依赖 | `debootstrap`、`e2fsprogs`、`sudo`、`mount`/`findmnt`、交叉编译工具链、`qemu-user`（**仅 x86_64**）等，完整清单和逐项用途见 `Dockerfile` 内的注释 |
 | `ENTRYPOINT` | `/usr/local/bin/entrypoint.sh` |
 | `WORKDIR` | `/work/kali-rootfs` —— 约定的仓库挂载点，`-v` 必须挂到这里 |
@@ -253,7 +253,7 @@ sudo dd if=build/rootfs.img of=/dev/mmcblk0pX bs=1M status=progress conv=fsync
 | arm64 上构建特别慢 | 用了 `PLATFORM=linux/amd64`（或老版本脚本）导致退化成 x86_64 模拟；新版脚本按 `uname -m` 自动推导，不会出现 |
 | `Exec format error` | binfmt 注册未带 `F` 标志，用 `multiarch/qemu-user-static --reset -p yes` 重注册 |
 | `mkdir ... permission denied` / mount 失败 | 少了 `--privileged`（或对应的 cap 组合） |
-| `apt-get` 报 `403 Forbidden` / `No address associated with hostname` | 基础镜像默认源 `http.kali.org` 是 GeoIP 重定向，国内可能被分到不可用的镜像。**新版 Dockerfile 已默认改用阿里云源**；如需换其他源：`docker build --build-arg APT_MIRROR=https://mirrors.ustc.edu.cn/kali -t kali-rootfs-builder .`（中科大示例） |
+| `apt-get` 报 `403 Forbidden` / `No address associated with hostname` | 基础镜像默认源 `http.kali.org` 是 GeoIP 重定向，国内可能被分到清华/东软等镜像，IP 段被屏蔽就 403。**根因**：Kali 2026.2 起 APT 源改用 deb822 文件的 `/etc/apt/sources.list.d/kali.sources`，旧的 `/etc/apt/sources.list` 在镜像里**根本不存在** —— 只往后者写内容等于没换源，自带的那份依然生效。Dockerfile 已改为「先删 `sources.list.d` 里的既有定义，再写阿里云」。如需换其他源：`docker build --build-arg APT_MIRROR=https://mirrors.ustc.edu.cn/kali -t kali-rootfs-builder .`（中科大示例） |
 | 容器内看不到 `/proc/sys/fs/binfmt_misc` | 正常。binfmt_misc 是伪文件系统，**内容不跨 mount namespace 传播**，但**执行**不受影响（注册是内核全局状态）。entrypoint 只在「挂上后确认无条目」时才报错 |
 | `可用磁盘仅 xxx MB` 告警 | 至少留 20GB |
 | 想跳过构建直接重打包 img | `build/rootfs.img` 存在时 `build-rootfs.sh` 会短路跳过，只有 `mk-image.sh` 干活，等于重打包。反向操作（全量重建）用 `FORCE_REBUILD=1` |
