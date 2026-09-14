@@ -1,0 +1,26 @@
+# 工作区记忆（本地数据，不上传仓库）
+.workbuddy/
+
+# 构建产物
+build/rootfs/
+build/*.tar
+build/*.tar.*
+build/*.img
+build/*.img.*
+build/*.xz
+build/*.zst
+images/
+
+# 编辑器与临时文件
+.vscode/
+.idea/
+*.swp
+*~
+*.bak
+*.orig
+*.rej
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
