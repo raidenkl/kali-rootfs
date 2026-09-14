@@ -12,9 +12,12 @@ cd "$(dirname -- "$(readlink -f -- "$0")")" && cd ..
 mkdir -p build && cd build
 
 
-if [[ -f ubuntu-22.04-server-arm64.rootfs.tar.xz && -f ubuntu-22.04-desktop-arm64.rootfs.tar.xz ]]; then
+# 断点续传：mk-image.sh 的产物 rootfs.img 已存在则跳过整套构建。
+# 需要强制重建时：rm -f build/rootfs.img（或删掉整个 build/ 目录）后重跑。
+if [[ -f rootfs.img ]]; then
+        echo "rootfs.img already exists, skipping build. (rm build/rootfs.img to force rebuild)"
         exit 0
-    fi
+fi
 
 
 # These env vars can cause issues with chroot
