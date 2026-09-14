@@ -11,6 +11,10 @@ name: Build Kali Rootfs
 #  两者跑的是**同一个 Dockerfile 和同一套脚本**，差别只在宿主架构。
 #  这正是要验证的点：容器方案在两种架构下是否行为一致。
 #
+#  ★ 平台选择：手动触发（Run workflow）时可用 build_arm64 / build_x86_64
+#  两个开关分别控制跑不跑（x86_64 默认不跑，省时间）；push / PR 触发时
+#  两个平台都照常跑，行为不变。
+#
 #  ⚠ 磁盘：runner 根分区实际有 72GB，但预装了 Android SDK / .NET / Haskell
 #  等占掉约 50GB。清理步骤能释放到 53~55GB 可用，够 rootfs + img 的峰值需求。
 #  这一步不能省，否则 debootstrap 中途会 No space left on device。
@@ -54,6 +58,16 @@ on:
           - lubancat-5
           - lubancat-5io
           - lubancat-5-v2
+      build_arm64:
+        description: '编译 arm64（原生，40~90 分钟）'
+        required: true
+        default: true
+        type: boolean
+      build_x86_64:
+        description: '编译 x86_64（qemu 交叉，90~180 分钟）'
+        required: true
+        default: false
+        type: boolean
       upload_artifact:
         description: '上传产物（占用大量存储，谨慎开启）'
         required: true
@@ -81,6 +95,13 @@ jobs:
   build:
     name: build (${{ matrix.label }})
     runs-on: ${{ matrix.runner }}
+
+    # 手动触发时按勾选的 build_arm64 / build_x86_64 过滤；
+    # push / pull_request 触发时两个都跑（矩阵兜底默认值见 include 里）。
+    if: >-
+      github.event_name != 'workflow_dispatch'
+      || (matrix.label == 'arm64-native' && inputs.build_arm64)
+      || (matrix.label == 'x86_64-qemu' && inputs.build_x86_64)
 
     strategy:
       # 一个架构失败不影响另一个 —— 这本来就是双平台对照测试
