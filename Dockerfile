@@ -36,8 +36,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #
 #  按用途分组：
 #    debootstrap              第 50/55 行：生成 kali-rolling 基础系统
-#    qemu-user-static        第 47/51 行：/usr/bin/qemu-aarch64-static 交叉执行
-#    qemu-user / binfmt-support  补齐 qemu 注册路径
+#    qemu-user-static        仅 x86_64 需要！见下方 ARCH 条件安装说明
 #    util-linux / mount      第 67-70、290-291 行：mount / umount / findmnt
 #    e2fsprogs               mk-image.sh 第 26/29/30 行：mkfs.ext4/e2fsck/resize2fs
 #    sudo                    mk-image.sh 第 20/21/26/29/30 行共 5 处调用
@@ -56,11 +55,21 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #  刻意不装的项：
 #    * python2 —— README 里列了它，但 kali-rolling 早已移除该包，
 #      照抄会让 apt-get install 直接失败。这是必须注意的差异。
+#    * binfmt-support / qemu-user-binfmt —— 这两个包靠 systemd 服务注册 binfmt，
+#      但 docker build 阶段服务不会启动（日志里可见 policy-rc.d denied），
+#      在本方案里从未生效，纯属无用依赖。
+#
+#  ★ qemu-user-static 为什么按架构条件安装：
+#      build-rootfs.sh 第 50 行用 `[ -f /usr/bin/qemu-aarch64-static ]` 分流：
+#        x86_64 容器 → 装了 amd64 版 qemu-user-static，该文件存在 → 走交叉构建
+#        arm64  容器 → 装的是 arm64 版，**不提供** qemu-aarch64-static
+#                      → 自动走原生 debootstrap，不需要 qemu
+#      在 arm64 上强装还会白拉 63.8MB 的 arm64 qemu-user（日志 Get:149 可见）。
 # -----------------------------------------------------------------------------
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        debootstrap qemu-user-static qemu-user binfmt-support \
+        debootstrap \
         util-linux mount e2fsprogs sudo \
         coreutils findutils tar gzip xz-utils zstd pigz \
         build-essential gcc-aarch64-linux-gnu \
@@ -71,6 +80,12 @@ RUN set -eux; \
         udev uuid-runtime git git-lfs \
         python3 python3-minimal python-is-python3 \
         wget curl ca-certificates file procps; \
+    if [ "$(uname -m)" = "x86_64" ] || [ "$(uname -m)" = "amd64" ]; then \
+        echo ">>> x86_64 宿主：安装 qemu-user-static（交叉构建 arm64 所需）"; \
+        apt-get install -y --no-install-recommends qemu-user-static; \
+    else \
+        echo ">>> $(uname -m) 宿主：原生执行，跳过 qemu-user-static（省 60MB+）"; \
+    fi; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb
 

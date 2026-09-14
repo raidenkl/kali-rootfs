@@ -150,8 +150,9 @@ jobs:
       # -----------------------------------------------------------------------
       - name: 环境信息
         run: |
+          ARCH="$(uname -m)"
           echo "=== Runner ==="
-          echo "架构      : $(uname -m)"
+          echo "架构      : ${ARCH}"
           echo "内核      : $(uname -r)"
           echo "CPU       : $(nproc) 核"
           echo ""
@@ -159,32 +160,46 @@ jobs:
           docker version --format '客户端: {{.Client.Version}} / 服务端: {{.Server.Version}}'
           docker buildx version
           echo ""
-          echo "=== binfmt（x86_64 需要，arm64 不需要）==="
-          if [ -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
+          echo "=== binfmt（仅交叉构建需要）==="
+          if [ "${ARCH}" = "aarch64" ] || [ "${ARCH}" = "arm64" ]; then
+            echo "宿主为原生 arm64 → 不需要 qemu binfmt（未注册属正常）"
+          elif [ -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
             echo "qemu-aarch64 已注册"
             cat /proc/sys/fs/binfmt_misc/qemu-aarch64 || true
           else
-            echo "qemu-aarch64 未注册（arm64 runner 上这是正常的）"
+            echo "qemu-aarch64 未注册 → 下一步会注册"
           fi
           echo ""
           echo "=== 需要的空间 ==="
           echo "rootfs 目录树 + rootfs.img 峰值约 20GB"
 
       # -----------------------------------------------------------------------
-      # 4. 注册 qemu binfmt（仅 x86_64 需要）
+      # 4. 注册 qemu binfmt（仅交叉构建需要）
       # -----------------------------------------------------------------------
       #  arm64 runner 是原生执行，完全不碰 qemu，所以跳过。
       #  x86_64 runner 必须注册，否则 chroot 内的 arm64 二进制报
       #  "Exec format error"，而那个报错毫无提示作用。
+      #
+      #  ★ 注意：这里注册的是【宿主】的 binfmt。binfmt_misc 跨 namespace 全局
+      #  共享，宿主注册后容器内零额外权限即可用。容器内 entrypoint.sh 也会
+      #  按自身架构判断是否需要，两者是独立的双保险。
       - name: 注册 qemu-aarch64 binfmt
         if: matrix.need_qemu == '1'
         run: |
-          echo ">>> 注册 qemu-aarch64 binfmt（x86_64 交叉构建所需）"
+          ARCH="$(uname -m)"
+          echo ">>> 宿主架构: ${ARCH}"
+
+          if [ "${ARCH}" = "aarch64" ] || [ "${ARCH}" = "arm64" ]; then
+            echo "原生 arm64，不需要 qemu，跳过"
+            exit 0
+          fi
+
           if [ -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
             echo "已注册，跳过"
           else
-            docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+            sudo docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
           fi
+
           echo ""
           echo "=== 验证 ==="
           cat /proc/sys/fs/binfmt_misc/qemu-aarch64 || {
@@ -193,13 +208,14 @@ jobs:
           }
           echo ""
           echo "=== 冒烟测试：能否执行 arm64 二进制 ==="
-          docker run --rm --platform linux/arm64 alpine:3.20 uname -m
+          sudo docker run --rm --platform linux/arm64 alpine:3.20 uname -m
 
       # -----------------------------------------------------------------------
       # 5. 构建薄容器镜像
       # -----------------------------------------------------------------------
       - name: 构建 docker 镜像
         run: |
+          set -o pipefail
           echo ">>> docker build（宿主架构 $(uname -m)）"
           docker build \
             --file Dockerfile \
@@ -210,6 +226,25 @@ jobs:
           echo "=== 镜像信息 ==="
           docker image inspect "${IMAGE_TAG}" \
             --format '大小: {{.Size}} bytes' || true
+          echo ""
+          echo "=== 确认 qemu 安装策略生效 ==="
+          ARCH="$(uname -m)"
+          if [ "${ARCH}" = "aarch64" ] || [ "${ARCH}" = "arm64" ]; then
+            if docker run --rm --entrypoint sh "${IMAGE_TAG}" \
+                 -c 'test -e /usr/bin/qemu-aarch64-static' 2>/dev/null; then
+              echo "::warning::arm64 镜像里出现了 qemu-aarch64-static（不必要）"
+            else
+              echo "OK: arm64 镜像未装 qemu-aarch64-static（符合预期）"
+            fi
+          else
+            if docker run --rm --entrypoint sh "${IMAGE_TAG}" \
+                 -c 'test -x /usr/bin/qemu-aarch64-static' 2>/dev/null; then
+              echo "OK: x86_64 镜像已备 qemu-aarch64-static（交叉构建必需）"
+            else
+              echo "::error::x86_64 镜像缺少 qemu-aarch64-static，交叉构建会失败"
+              exit 1
+            fi
+          fi
           docker images "${IMAGE_TAG%:*}"
 
       # -----------------------------------------------------------------------
@@ -225,12 +260,14 @@ jobs:
         id: build
         run: |
           set -o pipefail
-          echo ">>> 开始构建（板卡: ${BOARD}）"
-          echo ">>> 首次全量构建约 40~90 分钟，请耐心等待"
+          echo ">>> 开始构建（板卡: ${BOARD}，宿主架构: $(uname -m)）"
+          echo ">>> arm64 原生约 40~70 分钟 / x86_64 交叉约 90~180 分钟，请耐心等待"
           echo ""
           START=$(date +%s)
 
-          docker run --rm \
+          # 注意：不要用 -it（CI 无 TTY）。这里直接 docker run 而不经 build.sh，
+          # 是为了把 stdout 同时 tee 到日志文件，便于失败时排查。
+          sudo docker run --rm \
             --privileged \
             -v "${GITHUB_WORKSPACE}":/work/kali-rootfs \
             -w /work/kali-rootfs \

@@ -24,9 +24,11 @@
 
 **1. 宿主机安装 docker**
 
-**2. 宿主机注册 qemu-aarch64 binfmt**
+**2. 宿主机注册 qemu-aarch64 binfmt（仅 x86_64 需要）**
 
-容器是 x86_64，rootfs 是 arm64，debootstrap 第二阶段要在 chroot 内执行 arm64 的 `apt`/`dpkg`，依赖 qemu 用户态模拟：
+> **arm64 宿主机请跳过这一步。** 见下方说明。
+
+当容器是 x86_64 时，rootfs 是 arm64，debootstrap 第二阶段要在 chroot 内执行 arm64 的 `apt`/`dpkg`，依赖 qemu 用户态模拟：
 
 ```bash
 # 方法 A：安装系统包（推荐，永久生效）
@@ -41,6 +43,16 @@ cat /proc/sys/fs/binfmt_misc/qemu-aarch64
 ```
 
 > `binfmt_misc` 是全局跨 namespace 共享的。只要**宿主**注册过（带 `F` 标志），容器内无需任何额外权限即可执行 arm64 二进制。所以这一步不需要给容器 binfmt 权限。
+
+**为什么 arm64 宿主不需要**：`build-rootfs.sh` 第 50 行按「有没有 `/usr/bin/qemu-aarch64-static`」分流 —— 这个二进制是 **x86_64 独有**的（arm64 版 `qemu-user-static` 不提供它）。
+所以：
+
+| 宿主架构 | `/usr/bin/qemu-aarch64-static` | 走哪条路 | 需要 binfmt？ |
+|---|---|---|---|
+| x86_64 | 存在 | `debootstrap --foreign` + chroot | **是** |
+| arm64 | 不存在 | 原生 `debootstrap` | **否** |
+
+`entrypoint.sh` 会按**容器自身架构**（`uname -m`）判断，只在交叉构建时才要求 binfmt。
 
 **3. 预留 20GB 以上磁盘**
 

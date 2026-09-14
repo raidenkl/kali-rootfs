@@ -22,5 +22,6 @@ images/
 .DS_Store
 Thumbs.db
 
-# 日志
+# 日志与临时分析产物
 *.log
+log/

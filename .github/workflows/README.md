@@ -85,17 +85,45 @@ GitHub 仓库 → Actions → Build Kali Rootfs → Run workflow，可填：
 | 矩阵项 | runner | 宿主架构 | qemu | 说明 |
 |---|---|---|---|---|
 | `arm64-native` | `ubuntu-24.04-arm` | arm64 | **不需要** | 原生执行，构建快 3~8 倍 |
-| `x86_64-qemu` | `ubuntu-latest` | x86_64 | 需要 | 走 qemu 用户态模拟，和你本地 WSL/x86 docker 一致 |
+| `x86_64-qemu` | `ubuntu-latest` | x86_64 | 需要 | 走 qemu 用户态模拟，和本地 x86 docker 一致 |
 
 两者跑的是**同一个 Dockerfile、同一套脚本**，差异只在：
 
 1. x86_64 需要注册 `qemu-aarch64` binfmt（arm64 跳过）
 2. x86_64 慢得多
+3. **镜像里 qemu 的安装策略不同**（见下）
 
 **如果两边结果一致 → 说明容器方案架构无关，可靠。**
 **如果不一致 → 说明有地方依赖了宿主架构，需要排查。**
 
 矩阵配了 `fail-fast: false`，一个失败不影响另一个 —— 这样能同时看到两边的结果。
+
+### ★ 一个容易踩的坑：qemu 是按架构条件安装的
+
+`build-rootfs.sh` 第 50 行按「有没有 `/usr/bin/qemu-aarch64-static`」分流：
+
+```bash
+if [ -f /usr/bin/qemu-aarch64-static ]; then
+    debootstrap --foreign ...      # 交叉路径，需要 qemu
+    chroot ... /debootstrap/debootstrap --second-stage
+else
+    debootstrap --arch arm64 ...   # 原生路径，不需要 qemu
+fi
+```
+
+这意味着 Dockerfile 里 **不能无条件安装 `qemu-user-static`**：
+
+| 宿主架构 | `qemu-user-static` 装到 | `/usr/bin/qemu-aarch64-static` | 走哪条路 |
+|---|---|---|---|
+| x86_64 | amd64 版 | **存在** | 交叉 ✅ |
+| arm64 | arm64 版 | **不存在** | 原生 ✅（并在 arm64 上白拉 63.8MB） |
+
+所以本仓库的 Dockerfile 用 `if [ "$(uname -m)" = "x86_64" ]` 条件安装 ——
+arm64 上既省了 60MB+，又避免误导。
+
+> **历史 bug（已修）**：早期版本的 `entrypoint.sh` **无条件**检查
+> `/proc/sys/fs/binfmt_misc/qemu-aarch64`，导致 arm64 runner 上必然报错退出
+> （arm64 原生本来就不需要 binfmt）。现在改为按容器自身架构判断。
 
 ---
 
@@ -112,6 +140,8 @@ GitHub 仓库 → Actions → Build Kali Rootfs → Run workflow，可填：
 | 5 | **`90-naming-audios.rules` 在位** | ★ board hook 是否被正确补调 |
 | 6 | **`rtl8852be-reload.service` 在位** | ★ 同上，修 WiFi+BT 共存的 |
 | 7 | `e2fsck -fn` 通过 | 文件系统健康度 |
+
+另外第 5 步（构建 docker 镜像）也会按架构检查镜像内的 qemu 策略是否正确。
 
 第 3 项如果失败，会打印 img 内 `/dev` 的前 20 行内容，方便直接看到混入了什么。
 
@@ -165,11 +195,24 @@ docker run --rm \
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | `No space left on device` | 清理步骤没生效 | 检查第 1 步输出，确认释放后可用 >20GB |
+| **arm64 腿报「qemu-aarch64 binfmt 未注册」** | **entrypoint 旧版无条件检查 binfmt** | **已在 555468c 之后修复：改为按容器架构判断** |
 | `Exec format error` | x86_64 上 binfmt 未注册 | 检查第 4 步，`/proc/sys/fs/binfmt_misc/qemu-aarch64` 应存在 |
 | `/dev` 条目数告警 | 挂载残留 | 看 entrypoint.sh 的 `umount`/`findmnt` 逻辑 |
 | board hook 不生效 | `config_image_hook__` 未补调 | 看日志里 `执行 hook : config_image_hook__lubancat-4` 那行 |
-| apt 下载超时 | 镜像源问题 | 改 `build-rootfs.sh` 第 34 行的 mirror |
+| apt 下载超时 | 镜像源问题 | 见下方「镜像源」说明 |
+| `permission denied` 访问 docker | 缺 `sudo` | 本 workflow 已给 `docker run --privileged` 加 `sudo` |
 | 超时 | 240 分钟不够 | 调 `timeout-minutes`，或只跑 arm64 |
+
+### 镜像源说明（易误解）
+
+`build-rootfs.sh` 第 37 行配的是 **阿里云** `mirrors.aliyun.com/kali/`，但
+**Dockerfile 阶段 `apt-get update` 用的是镜像基础自带的官方源**
+（`kali.download` / `http.kali.org`）。
+
+两者互不影响：阿里云只作用于 `debootstrap`（脚本第 53/58 行）。
+
+> GitHub runner 在海外，**官方源反而更快**，所以不要为了「加速」去改 Dockerfile 的源。
+> 阿里云那行只有在国内本地调试时才体现优势。本次 Dockerfile 阶段约 27 秒完成，无需优化。
 
 ---
 

@@ -38,11 +38,15 @@ cd "${REPO_ROOT}"
 command -v docker >/dev/null 2>&1 || { echo "ERROR: 未找到 docker" >&2; exit 1; }
 docker info >/dev/null 2>&1 || { echo "ERROR: docker daemon 未运行（或当前用户无权限）" >&2; exit 1; }
 
-# binfmt 前置检查 —— 放在宿主机侧检查，比在容器里报错更早、提示更清楚
-if [ ! -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
-    cat >&2 <<'EOF'
+# binfmt 前置检查 —— 放在宿主机侧检查，比在容器里报错更早、提示更清楚。
+# 仅交叉构建需要：宿主是 arm64 时执行 arm64 二进制是原生行为，不需要 qemu。
+HOST_ARCH="$(uname -m)"
+if [ "$HOST_ARCH" != "aarch64" ] && [ "$HOST_ARCH" != "arm64" ] \
+   && [ ! -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
+    cat >&2 <<EOF
 
 ERROR: 宿主机未注册 qemu-aarch64 binfmt，无法交叉构建 arm64 rootfs。
+       （宿主架构 ${HOST_ARCH}，需要 qemu 用户态模拟）
 
   请执行以下任一种：
 
