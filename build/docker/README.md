@@ -65,6 +65,23 @@ cat /proc/sys/fs/binfmt_misc/qemu-aarch64
 
 `entrypoint.sh` 会按**容器自身架构**（`uname -m`）判断，只在交叉构建时才要求 binfmt。
 
+**注意：容器内默认读不到 `/proc/sys/fs/binfmt_misc`**
+
+`binfmt_misc` 是**伪文件系统，内容不跨 mount namespace 传播**。容器的 `/proc` 是独立
+procfs 实例，宿主的 `binfmt_misc` 挂载不会传播进来 —— 所以在容器里**默认看不到**
+`/proc/sys/fs/binfmt_misc/qemu-aarch64`，即使宿主已注册且功能正常：
+
+```bash
+# 容器内需要手动挂载才能读到（--privileged 允许）
+mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
+```
+
+但**执行不受影响** —— 注册是内核全局状态，`multiarch/qemu-user-static --reset -p yes`
+带的 `F`(fix_binary) 标志让内核在注册时就缓存了 qemu 二进制，与 namespace 无关。
+
+`entrypoint.sh` 因此分三层判定：能读到就校验（并检查 `F` 标志）；
+挂上了却无条目则报错；**读不到只告警、不阻断**，判定以宿主机侧为准。
+
 **3. 预留 20GB 以上磁盘**
 
 | 项 | 占用 |

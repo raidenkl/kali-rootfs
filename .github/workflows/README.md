@@ -131,6 +131,39 @@ fi
 > `/proc/sys/fs/binfmt_misc/qemu-aarch64`，导致 arm64 runner 上必然报错退出
 > （arm64 原生本来就不需要 binfmt）。现在改为按容器自身架构判断。
 
+### ★★ 另一个坑：`binfmt_misc` 的内容**不跨 namespace 传播**
+
+这是最容易误判的一点 —— **在容器里默认读不到 `/proc/sys/fs/binfmt_misc/qemu-aarch64`，
+哪怕宿主已注册且功能完全正常。**
+
+原因：`binfmt_misc` 是一个**伪文件系统**，它的**内容不跨 mount namespace 传播**。
+容器的 `/proc` 是独立的 procfs 实例，宿主上 `/proc/sys/fs/binfmt_misc` 这个挂载
+不会传播进来。要在容器里看到它，必须**手动挂载**（需要 `--privileged`）：
+
+```bash
+mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
+```
+
+但**执行**不受影响：binfmt_misc 注册是**内核全局状态**，而且
+`multiarch/qemu-user-static --reset -p yes` 会带上 **`F` (fix_binary) 标志** ——
+内核在注册时就把 qemu 二进制打开了，之后无论在哪个 namespace 都能用。
+这正是 `docker run --platform linux/arm64 alpine uname -m` 能成功的原因。
+
+**所以 `entrypoint.sh` 的判定分三层**：
+
+| 情况 | 处理 |
+|---|---|
+| 容器自己挂上了 `binfmt_misc`，条目存在 | ✅ 通过，并顺带检查 `F` 标志 |
+| 挂上了但**没有**条目（用 `$BINFMT_DIR/status` 是否存在来确认真的挂上了） | ❌ 宿主确实没注册，报错退出 |
+| 本就挂不上、也读不到 | ⚠️ **只告警，不阻断** —— 无法判定，以宿主机侧为准 |
+
+> 用 `status` 文件而不是 `mountpoint -q` 来判断「是否真的挂上」：
+> 若有人 bind-mount 了一个空目录到该路径，`mountpoint` 也返回真，
+> 会让我们误判成「挂上了但没注册」而错误地失败。
+
+这也是为什么 workflow **第 4 步在宿主机上**校验（`cat /proc/sys/fs/binfmt_misc/qemu-aarch64`
++ 实跑一个 arm64 二进制）—— 宿主侧才是权威判定，容器内只是尽力而为。
+
 ---
 
 ## 四、验证步骤会检查什么
@@ -203,6 +236,7 @@ docker run --rm \
 | `No space left on device` | 清理步骤没生效 | 检查第 1 步输出，确认释放后可用 >20GB |
 | **arm64 腿报「qemu-aarch64 binfmt 未注册」** | **entrypoint 旧版无条件检查 binfmt** | **已修：改为按容器架构判断** |
 | **x86_64 腿报「镜像缺少 qemu-aarch64-static」** | **Debian 2026-01 删除了 `qemu-user-static` 包，不再创建 `-static` 软链** | **已修：Dockerfile/entrypoint 补建软链指向静态的 `qemu-aarch64`** |
+| **x86_64 腿报「宿主机未注册 qemu-aarch64 binfmt」但宿主明明注册了** | **`binfmt_misc` 内容不跨 mount namespace，容器里默认读不到** | **已修：entrypoint 先自行 `mount -t binfmt_misc`；挂不上时只告警不阻断** |
 | `Exec format error` | x86_64 上 binfmt 未注册 | 检查第 4 步，`/proc/sys/fs/binfmt_misc/qemu-aarch64` 应存在 |
 | `/dev` 条目数告警 | 挂载残留 | 看 entrypoint.sh 的 `umount`/`findmnt` 逻辑 |
 | board hook 不生效 | `config_image_hook__` 未补调 | 看日志里 `执行 hook : config_image_hook__lubancat-4` 那行 |

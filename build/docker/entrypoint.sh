@@ -85,10 +85,54 @@ case "$CONTAINER_ARCH" in
         fi
 
         # --- 交叉构建前置 2/2：宿主 binfmt 注册 --------------------------------
-        if [ ! -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
+        #  ⚠ 关键细节（曾在此处误判）：
+        #  /proc/sys/fs/binfmt_misc 是**伪文件系统**，其内容**不跨 mount
+        #  namespace 传播**。容器的 /proc 是独立的 procfs 实例，宿主上的
+        #  binfmt_misc 挂载不会传播进来 —— 所以在容器里**默认根本看不到**
+        #  /proc/sys/fs/binfmt_misc/qemu-aarch64，哪怕宿主已注册且功能正常。
+        #
+        #  但**执行**是没问题的：binfmt_misc 注册是内核全局状态，且
+        #  multiarch/qemu-user-static --reset -p yes 会带 F(fix_binary) 标志 ——
+        #  内核在注册时就打开了 qemu 二进制，之后无论在哪个 namespace 都能用。
+        #  这正是 `docker run --platform linux/arm64 alpine uname -m` 能成功的原因。
+        #
+        #  所以判据要分三层：
+        #    ① 先尝试自己挂 binfmt_misc（--privileged 允许）→ 挂上后读到的是
+        #       全局状态，可据此准确判断
+        #    ② 挂上了但没条目 → 宿主确实没注册 → 报错退出
+        #    ③ 挂不上 → 无法判定 → 只告警，不阻断（宿主机侧的检查才是权威）
+        #
+        #  判定「确实挂上了」用 $BINFMT_DIR/status 是否存在 —— 真正的
+        #  binfmt_misc 文件系统会暴露一个 status 文件（内容 enabled/disabled）。
+        #  不能用 mountpoint -q：若有人 bind-mount 了一个空目录到该路径，
+        #  mountpoint 也返回真，会让我们误判成「挂上了但没注册」。
+        BINFMT_DIR=/proc/sys/fs/binfmt_misc
+        BINFMT_MOUNTED=0
+
+        if [ ! -f "$BINFMT_DIR/qemu-aarch64" ]; then
+            mkdir -p "$BINFMT_DIR" 2>/dev/null || true
+            mount -t binfmt_misc binfmt_misc "$BINFMT_DIR" 2>/dev/null || true
+        fi
+        if [ -f "$BINFMT_DIR/status" ]; then
+            BINFMT_MOUNTED=1
+        fi
+
+        if [ -f "$BINFMT_DIR/qemu-aarch64" ]; then
+            echo "    binfmt    : qemu-aarch64 已注册（交叉构建模式）"
+            # F 标志 = fix binary：内核已缓存解释器，chroot 内执行 arm64 不依赖
+            # 容器 namespace 里能否找到 qemu 文件。没有 F 时容易踩坑，提示一下。
+            if grep -q '^flags:.*F' "$BINFMT_DIR/qemu-aarch64" 2>/dev/null; then
+                echo "    binfmt F  : 已置位（内核已缓存解释器，namespace 无关）"
+            else
+                warn "binfmt 未带 F(fix_binary) 标志 —— chroot 内执行 arm64 可能失败。"
+                warn "修复：用 multiarch/qemu-user-static --reset -p yes 重新注册（-p 即 persistent/F）。"
+            fi
+        elif [ "$BINFMT_MOUNTED" = "1" ]; then
+            # 挂载成功却读不到条目 → 宿主确实没注册，这是真错误
             cat >&2 <<EOF
 
-ERROR: 交叉构建需要宿主机注册 qemu-aarch64 binfmt，但未注册。
+ERROR: 宿主机未注册 qemu-aarch64 binfmt。
+       （已在容器内挂载 binfmt_misc 并确认该条目不存在，判定可靠）
 
   容器是 ${CONTAINER_ARCH} 架构，而 kali rootfs 是 arm64，debootstrap 的
   第二阶段需要在 chroot 内执行 arm64 的 apt/dpkg，这依赖 qemu 用户态模拟。
@@ -103,13 +147,19 @@ ERROR: 交叉构建需要宿主机注册 qemu-aarch64 binfmt，但未注册。
          sudo systemctl restart systemd-binfmt
          # 或者： sudo update-binfmts --enable qemu-aarch64
 
-  验证：
-         cat /proc/sys/fs/binfmt_misc/qemu-aarch64    # 应输出 enabled
+  验证（在宿主机上跑）：
+         cat /proc/sys/fs/binfmt_misc/qemu-aarch64    # 应看到 enabled 与 flags: ...F
 
 EOF
             exit 1
+        else
+            # 无法判定：不阻断。执行本身依赖内核全局状态，与 namespace 可见性无关；
+            # 宿主机侧（build.sh / CI 注册步骤）已做过权威校验。
+            warn "无法在容器内读取 /proc/sys/fs/binfmt_misc：该伪文件系统的内容"
+            warn "不跨 mount namespace 传播，且本容器未能自行挂载它。"
+            warn "跳过容器内检查 —— 判定以宿主机侧为准（build.sh 或 CI 的注册步骤）。"
+            warn "若随后 debootstrap 报 'Exec format error'，请回到宿主机注册 binfmt。"
         fi
-        echo "    binfmt    : qemu-aarch64 已注册（交叉构建模式）"
         ;;
 esac
 
