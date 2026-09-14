@@ -36,7 +36,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #
 #  按用途分组：
 #    debootstrap              第 50/55 行：生成 kali-rolling 基础系统
-#    qemu-user-static        仅 x86_64 需要！见下方 ARCH 条件安装说明
+#    qemu-user / qemu-user-binfmt   仅 x86_64 需要！见下方 ★★ 说明
+#                            （注意：**不是** qemu-user-static，该包已被 Debian 删除）
 #    util-linux / mount      第 67-70、290-291 行：mount / umount / findmnt
 #    e2fsprogs               mk-image.sh 第 26/29/30 行：mkfs.ext4/e2fsck/resize2fs
 #    sudo                    mk-image.sh 第 20/21/26/29/30 行共 5 处调用
