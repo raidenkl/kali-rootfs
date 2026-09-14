@@ -96,13 +96,6 @@ jobs:
     name: build (${{ matrix.label }})
     runs-on: ${{ matrix.runner }}
 
-    # 手动触发时按勾选的 build_arm64 / build_x86_64 过滤；
-    # push / pull_request 触发时两个都跑（矩阵兜底默认值见 include 里）。
-    if: >-
-      github.event_name != 'workflow_dispatch'
-      || (matrix.label == 'arm64-native' && inputs.build_arm64)
-      || (matrix.label == 'x86_64-qemu' && inputs.build_x86_64)
-
     strategy:
       # 一个架构失败不影响另一个 —— 这本来就是双平台对照测试
       fail-fast: false
@@ -112,10 +105,17 @@ jobs:
             runner: ubuntu-24.04-arm
             arch: arm64
             need_qemu: '0'
+            # 手动触发时按 inputs 决定跑不跑；push/PR 时恒为 true（两腿照跑）
+            enabled: ${{ github.event_name != 'workflow_dispatch' || inputs.build_arm64 }}
           - label: x86_64-qemu
             runner: ubuntu-latest
             arch: amd64
             need_qemu: '1'
+            enabled: ${{ github.event_name != 'workflow_dispatch' || inputs.build_x86_64 }}
+
+    # matrix 上下文在 job 级 if 里不可用（GitHub 限制：矩阵展开前求值），
+    # 所以 enabled 先在矩阵里按平台算好，这里只读结果。
+    if: matrix.enabled == true
 
     # 首次全量构建 40~90 分钟，给足余量（上限 6 小时）
     timeout-minutes: 240
