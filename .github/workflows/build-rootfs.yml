@@ -11,10 +11,6 @@ name: Build Kali Rootfs
 #  两者跑的是**同一个 Dockerfile 和同一套脚本**，差别只在宿主架构。
 #  这正是要验证的点：容器方案在两种架构下是否行为一致。
 #
-#  ★ 平台选择：手动触发（Run workflow）时可用 build_arm64 / build_x86_64
-#  两个开关分别控制跑不跑（x86_64 默认不跑，省时间）；push / PR 触发时
-#  两个平台都照常跑，行为不变。
-#
 #  ⚠ 磁盘：runner 根分区实际有 72GB，但预装了 Android SDK / .NET / Haskell
 #  等占掉约 50GB。清理步骤能释放到 53~55GB 可用，够 rootfs + img 的峰值需求。
 #  这一步不能省，否则 debootstrap 中途会 No space left on device。
@@ -58,16 +54,6 @@ on:
           - lubancat-5
           - lubancat-5io
           - lubancat-5-v2
-      build_arm64:
-        description: '编译 arm64（原生，40~90 分钟）'
-        required: true
-        default: true
-        type: boolean
-      build_x86_64:
-        description: '编译 x86_64（qemu 交叉，90~180 分钟）'
-        required: true
-        default: false
-        type: boolean
       upload_artifact:
         description: '上传产物（占用大量存储，谨慎开启）'
         required: true
@@ -105,17 +91,10 @@ jobs:
             runner: ubuntu-24.04-arm
             arch: arm64
             need_qemu: '0'
-            # 手动触发时按 inputs 决定跑不跑；push/PR 时恒为 true（两腿照跑）
-            enabled: ${{ github.event_name != 'workflow_dispatch' || inputs.build_arm64 }}
           - label: x86_64-qemu
             runner: ubuntu-latest
             arch: amd64
             need_qemu: '1'
-            enabled: ${{ github.event_name != 'workflow_dispatch' || inputs.build_x86_64 }}
-
-    # matrix 上下文在 job 级 if 里不可用（GitHub 限制：矩阵展开前求值），
-    # 所以 enabled 先在矩阵里按平台算好，这里只读结果。
-    if: matrix.enabled == true
 
     # 首次全量构建 40~90 分钟，给足余量（上限 6 小时）
     timeout-minutes: 240
