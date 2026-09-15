@@ -53,6 +53,7 @@ build/mk-image.sh         ->   build/rootfs.img     # 最终产物
 1. **Docker**（23.0+；更老的版本先 `export DOCKER_BUILDKIT=1`，因为 `docker build --platform` 依赖 BuildKit）
 2. **20GB 以上可用磁盘**：rootfs 目录树 5~10GB，`mkfs.ext4 -d` 期间 img 与目录树并存 5~8GB，另有 2GB swapfile 和 apt 缓存
 3. **shell 环境**：在 Linux / macOS / **WSL2** 的 bash 里执行。Windows 的 Git Bash 直接跑会因为 `F:\...` 路径转换失败，请先进入 WSL2
+4. **宿主内核 ≥ 5.10**（推荐 ≥ 5.14）：Kali-rolling 的 systemd 260+ 把内核基线提到 5.10，低于基线时 chroot 内 apt/dpkg 会大面积失败、构建无法完成；5.10~5.13 仅提示仍可继续。用 `uname -r` 自查
 
 ### 2.2 Dockerfile 里有什么
 
@@ -216,6 +217,9 @@ FORCE_REBUILD=1 bash build/docker/build.sh
 # CI / 无 TTY 环境
 INTERACTIVE=0 bash build/docker/build.sh
 
+# 跳过宿主内核版本预检（默认会拦掉 < 5.10 的内核；一般不要设）
+SKIP_KERNEL_CHECK=1 bash build/docker/build.sh
+
 # 自定义镜像名
 IMAGE=my-builder bash build/docker/build.sh
 ```
@@ -257,6 +261,7 @@ sudo dd if=build/rootfs.img of=/dev/mmcblk0pX bs=1M status=progress conv=fsync
 | 容器内看不到 `/proc/sys/fs/binfmt_misc` | 正常。binfmt_misc 是伪文件系统，**内容不跨 mount namespace 传播**，但**执行**不受影响（注册是内核全局状态）。entrypoint 只在「挂上后确认无条目」时才报错 |
 | `可用磁盘仅 xxx MB` 告警 | 至少留 20GB |
 | 想跳过构建直接重打包 img | `build/rootfs.img` 存在时 `build-rootfs.sh` 会短路跳过，只有 `mk-image.sh` 干活，等于重打包。反向操作（全量重建）用 `FORCE_REBUILD=1` |
+| 构建在 `apt-get`/`dpkg` 阶段报 `EUNATCH` / `Protocol driver not attached`，`dpkg` 返回 100 | 宿主内核 < 5.10，Kali-rolling 的 systemd 260+ 不兼容。升级内核到 ≥ 5.10（推荐 ≥ 5.14），或改用内核 6.8 的 CI 构建；`SKIP_KERNEL_CHECK=1` 可绕过入口预检（不推荐） |
 
 ### 2.10 相关文档
 

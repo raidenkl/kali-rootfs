@@ -23,10 +23,42 @@ trap 'echo "Error: in $0 on line $LINENO" >&2' ERR
 REPO="${REPO:-/work/kali-rootfs}"
 BOARD="${BOARD:-lubancat-4}"
 FORCE_REBUILD="${FORCE_REBUILD:-0}"
+SKIP_KERNEL_CHECK="${SKIP_KERNEL_CHECK:-0}"
 
 log()  { printf '\n\033[1m>>> %s\033[0m\n' "$*"; }
 warn() { printf '\033[33mWARN: %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
+
+# --- 内核版本判定辅助（与 build.sh 内置同一份，保持两个脚本各自独立可跑）-------
+#  只用 bash 参数展开解析主.次版本号；解析不出数字时放行，绝不误拦。
+#  注意：本脚本是 set -eE + ERR trap，每个分支都必须返回 0，否则赋值语境会中断。
+kernel_majmin() {
+    local rel="$1" head maj min
+    [ -n "$rel" ] || return 0
+    head="${rel%%[!0-9.]*}"             # 5.4.0-216-generic -> 5.4.0
+    [ -n "$head" ] || return 0
+    maj="${head%%.*}"
+    min="${head#*.}"; min="${min%%.*}"
+    case "${maj}${min}" in *[!0-9]*) return 0 ;; esac   # 解析不出数字 -> 放行
+    [ -n "$maj" ] || return 0
+    [ -n "$min" ] || min=0
+    printf '%s %s' "$maj" "$min"
+}
+
+# 分级：hard(<5.10) / soft(5.10~5.13) / ok(>=5.14)；解析失败一律 ok（不误拦）
+kernel_grade() {
+    local mm maj min
+    mm="$(kernel_majmin "$1")"
+    [ -n "$mm" ] || { printf ok; return 0; }
+    maj="${mm%% *}"; min="${mm##* }"
+    if [ "$maj" -lt 5 ] || { [ "$maj" -eq 5 ] && [ "$min" -lt 10 ]; }; then
+        printf hard
+    elif [ "$maj" -eq 5 ] && [ "$min" -lt 14 ]; then
+        printf soft
+    else
+        printf ok
+    fi
+}
 
 # =============================================================================
 #  1. 环境自检
@@ -41,6 +73,24 @@ log "[自检] 运行环境"
 echo "    仓库      : $REPO"
 echo "    板卡      : $BOARD"
 echo "    内核      : $(uname -r) / $(uname -m)"
+
+# --- 宿主内核版本预检 ----------------------------------------------------------
+#  容器与宿主共享内核，此处 uname -r 读到的就是宿主内核，判定可靠，故做成硬报错。
+#  systemd 260+ 的内核基线是 5.10，低于基线时 chroot 内 apt/dpkg 会大面积失败。
+#  与 build.sh 构成双保险：覆盖手动 docker run 与 CI 直跑容器的路径。
+if [ "${SKIP_KERNEL_CHECK}" != "1" ]; then
+    case "$(kernel_grade "$(uname -r)")" in
+        hard)
+            die "宿主内核版本过低（$(uname -r)），Kali-rolling 的 systemd 260+ 要求内核 ≥ 5.10；请升级内核（参见根 README 2.1）或改用内核 6.8 的 CI 构建"
+            ;;
+        soft)
+            warn "宿主内核 $(uname -r) 介于 5.10~5.13，低于 systemd 推荐基线 5.14，建议升级内核"
+            ;;
+        *)
+            :   # ≥ 5.14 静默通过
+            ;;
+    esac
+fi
 
 # --- binfmt 检查（仅交叉构建需要）---------------------------------------------
 #  ★ 判据必须用【容器自身】架构，不能无条件检查。

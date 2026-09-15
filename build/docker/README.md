@@ -91,6 +91,12 @@ mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
 | swapfile（在 rootfs 内，脚本行为） | 2GB |
 | apt 下载缓存 | 1~2GB |
 
+**4. 宿主内核 ≥ 5.10（推荐 ≥ 5.14）**
+
+Kali-rolling 的 systemd 260+ 把内核基线从 5.4 提到 **5.10**，并删除了老内核的兼容代码。内核低于基线时，chroot 内 apt/dpkg 的 postinst（典型如 `systemd-machine-id-setup`）会失败、dpkg 返回 100，构建无法完成。
+
+`build.sh` 与容器内 `entrypoint.sh` 都会在入口预检：`< 5.10` 直接报错退出；`5.10~5.13` 打印一行提示后继续；`≥ 5.14` 静默通过。用 `uname -r` 自查；临时跳过（不推荐）：`SKIP_KERNEL_CHECK=1 bash build/docker/build.sh`。
+
 ### 执行
 
 ```bash
