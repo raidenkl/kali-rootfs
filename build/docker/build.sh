@@ -11,6 +11,7 @@
 #      REBUILD=0 bash build/docker/build.sh          # 不重建镜像，直接跑
 #      FORCE_REBUILD=1 bash build/docker/build.sh    # 忽略 rootfs.img 强制全量重建
 #      BOARD=lubancat-5 bash build/docker/build.sh   # 换板卡
+#      SKIP_KERNEL_CHECK=1 bash build/docker/build.sh  # 跳过宿主内核预检（不推荐）
 #
 #  收紧权限（不用 --privileged，适合共享机器）：
 #      EXTRA_RUN_ARGS='--cap-add SYS_ADMIN --cap-add SYS_CHROOT --cap-add MKNOD \
@@ -35,6 +36,7 @@ BOARD="${BOARD:-lubancat-4}"
 FORCE_REBUILD="${FORCE_REBUILD:-0}"
 INTERACTIVE="${INTERACTIVE:-1}"
 EXTRA_RUN_ARGS="${EXTRA_RUN_ARGS:-}"
+SKIP_KERNEL_CHECK="${SKIP_KERNEL_CHECK:-0}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -43,6 +45,75 @@ cd "${REPO_ROOT}"
 # ------------------------------- 前置校验 -----------------------------------
 command -v docker >/dev/null 2>&1 || { echo "ERROR: 未找到 docker" >&2; exit 1; }
 docker info >/dev/null 2>&1 || { echo "ERROR: docker daemon 未运行（或当前用户无权限）" >&2; exit 1; }
+
+# --- 宿主内核版本预检 ----------------------------------------------------------
+#  Kali-rolling 的 systemd ≥ 260 把内核基线提到 5.10（官方 NEWS：baseline 5.10 /
+#  recommended 5.14），并删除了老内核的兼容代码。内核低于基线时，chroot 内
+#  apt/dpkg 的 postinst 会因 EUNATCH(49)（"Protocol driver not attached"）
+#  大面积失败，构建根本跑不完。放在 docker build 之前拦住，避免白等镜像构建。
+#  可用 SKIP_KERNEL_CHECK=1 跳过（不推荐，构建大概率仍会失败）。
+kernel_majmin() {
+    local rel="$1" head maj min
+    [ -n "$rel" ] || return 0
+    head="${rel%%[!0-9.]*}"             # 5.4.0-216-generic -> 5.4.0
+    [ -n "$head" ] || return 0
+    maj="${head%%.*}"
+    min="${head#*.}"; min="${min%%.*}"
+    case "${maj}${min}" in *[!0-9]*) return 0 ;; esac   # 解析不出数字 -> 放行
+    [ -n "$maj" ] || return 0
+    [ -n "$min" ] || min=0
+    printf '%s %s' "$maj" "$min"
+}
+
+# 分级：hard(<5.10) / soft(5.10~5.13) / ok(>=5.14)；解析失败一律 ok（不误拦）
+kernel_grade() {
+    local mm maj min
+    mm="$(kernel_majmin "$1")"
+    [ -n "$mm" ] || { printf ok; return 0; }
+    maj="${mm%% *}"; min="${mm##* }"
+    if [ "$maj" -lt 5 ] || { [ "$maj" -eq 5 ] && [ "$min" -lt 10 ]; }; then
+        printf hard
+    elif [ "$maj" -eq 5 ] && [ "$min" -lt 14 ]; then
+        printf soft
+    else
+        printf ok
+    fi
+}
+
+if [ "${SKIP_KERNEL_CHECK}" != "1" ]; then
+    case "$(kernel_grade "$(uname -r)")" in
+        hard)
+            cat >&2 <<EOF
+
+ERROR: 宿主内核版本过低（$(uname -r)），Kali-rolling 的 systemd 260+ 要求内核 ≥ 5.10。
+
+       systemd v260 起把内核基线从 5.4 提到 5.10，并删除了老内核的兼容代码。内核低于
+       基线时，chroot 内 apt/dpkg 的 postinst 会大面积失败（典型：systemd-machine-id-setup
+       报 EUNATCH 退出非 0 → dpkg 返回 100 → docker build 失败），构建根本跑不完。
+
+  请选择以下出路之一：
+
+    A. 升级宿主内核到 ≥ 5.10（推荐 ≥ 5.14，systemd 官方推荐基线）
+         Ubuntu 20.04（默认 5.4）：sudo apt-get install linux-generic-hwe-20.04
+         重启后用 uname -r 确认
+
+    B. 改用已全绿的 CI 构建（ubuntu-24.04 runner，内核 6.8）
+         见 .github/workflows/build-rootfs.yml，勾选 upload_artifact 可取产物
+
+  若只想验证脚本其他部分（不推荐，构建大概率仍会失败）：
+         SKIP_KERNEL_CHECK=1 bash build/docker/build.sh
+
+EOF
+            exit 1
+            ;;
+        soft)
+            echo "提示：宿主内核 $(uname -r) 介于 5.10~5.13，低于 systemd 推荐基线 5.14，构建通常可完成但建议升级。"
+            ;;
+        *)
+            :   # ≥ 5.14 静默通过
+            ;;
+    esac
+fi
 
 # binfmt 前置检查 —— 放在宿主机侧检查，比在容器里报错更早、提示更清楚。
 # 仅交叉构建需要：宿主是 arm64 时执行 arm64 二进制是原生行为，不需要 qemu。
@@ -119,6 +190,7 @@ docker run --rm \
     -w /work/kali-rootfs \
     -e BOARD="${BOARD}" \
     -e FORCE_REBUILD="${FORCE_REBUILD}" \
+    -e SKIP_KERNEL_CHECK="${SKIP_KERNEL_CHECK}" \
     "${IMAGE}"
 
 # ------------------------------- 3. 汇报产物 ---------------------------------
