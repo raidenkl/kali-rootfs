@@ -9,6 +9,9 @@ build/*.img
 build/*.img.*
 build/*.xz
 build/*.zst
+build/firmware/*
+!build/firmware/README.md
+build/update-img/
 images/
 
 # 编辑器与临时文件
