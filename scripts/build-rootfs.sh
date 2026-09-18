@@ -8,16 +8,61 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-cd "$(dirname -- "$(readlink -f -- "$0")")" && cd ..
+SELF_PATH="$(readlink -f -- "$0")"
+cd "$(dirname -- "${SELF_PATH}")" && cd ..
 mkdir -p build && cd build
+
+# ── 构建模式开关（不设置时行为与旧版完全一致：不是全量就是跳过）──────────
+#   INCREMENTAL=1    增量：复用 build/rootfs 里已完成的重型阶段
+#                    （debootstrap / apt / swapfile / 自带 deb / firmware），
+#                    只重跑廉价的定制阶段（overlay 拷贝、服务使能、配置覆写）。
+#                    改 overlay 后几十秒即可得到新的 rootfs 目录树。
+#   FORCE_REBUILD=1  忽略所有缓存与标记，从零全量重建（含删掉状态目录）。
+#   APT_REFRESH=1    增量模式下仍强制重跑 apt 阶段（想拉最新软件包时用）。
+#   命令行等价写法：--incremental / --force / --apt-refresh / --help
+#
+#   状态目录 build/.build-state/ 只记录"哪些阶段已完成 + 输入指纹"：
+#     删掉它 = 回到全量重建；改包列表 / 镜像源会自动让对应阶段失效重跑。
+for _arg in "$@"; do
+        case "$_arg" in
+                --incremental) INCREMENTAL=1 ;;
+                --force|--full) FORCE_REBUILD=1 ;;
+                --apt-refresh) APT_REFRESH=1 ;;
+                -h|--help)
+                        echo "Usage: $0 [--incremental|--force|--apt-refresh]"
+                        echo "  --incremental  复用 build/rootfs 已完成的重型阶段，只重跑定制阶段"
+                        echo "  --force        删除所有缓存与标记，从零全量重建"
+                        echo "  --apt-refresh  增量模式下强制重跑 apt 阶段"
+                        echo "  等价环境变量: INCREMENTAL=1 / FORCE_REBUILD=1 / APT_REFRESH=1"
+                        exit 0
+                        ;;
+                *) echo "Unknown option: $_arg (try --help)"; exit 1 ;;
+        esac
+done
+INCREMENTAL="${INCREMENTAL:-0}"
+FORCE_REBUILD="${FORCE_REBUILD:-0}"
+APT_REFRESH="${APT_REFRESH:-0}"
+STATE_DIR=".build-state"
+STAGE_DIR="${STATE_DIR}/stages"
+
+# 阶段标记与指纹：done 表示该阶段跑完，fp 记录当时的输入，输入变了就自动失效
+stage_done()  { [ -f "${STAGE_DIR}/$1.done" ]; }
+stage_fp_ok() { [ -f "${STAGE_DIR}/$1.fp" ] && [ "$(cat "${STAGE_DIR}/$1.fp")" = "$2" ]; }
+stage_mark()  { mkdir -p "${STAGE_DIR}"; touch "${STAGE_DIR}/$1.done"; printf '%s' "$2" > "${STAGE_DIR}/$1.fp"; }
+fp_of()       { printf '%s' "$1" | md5sum | cut -d' ' -f1; }
+mode_of()     { if [[ ${INCREMENTAL} == 1 ]]; then echo "[增量]"; else echo "[全量]"; fi; }
 
 
 # 断点续传：mk-image.sh 的产物 rootfs.img 已存在则跳过整套构建。
 # 需要强制重建时：rm -f build/rootfs.img（或删掉整个 build/ 目录）后重跑。
-if [[ -f rootfs.img ]]; then
-        echo "rootfs.img already exists, skipping build. (rm build/rootfs.img to force rebuild)"
+# 增量模式（INCREMENTAL=1）下不短路 —— 否则"改完 overlay 再打包"这条最快的路走不通。
+if [[ -f rootfs.img && ${INCREMENTAL} != 1 && ${FORCE_REBUILD} != 1 ]]; then
+        echo "rootfs.img already exists, skipping build."
+        echo "  强制全量重建 : FORCE_REBUILD=1 $0      （或 rm -f build/rootfs.img）"
+        echo "  增量更新     : INCREMENTAL=1 $0"
         exit 0
 fi
+echo "$(mode_of) 构建模式: INCREMENTAL=${INCREMENTAL} FORCE_REBUILD=${FORCE_REBUILD} APT_REFRESH=${APT_REFRESH}"
 
 
 # These env vars can cause issues with chroot
@@ -40,22 +85,51 @@ chroot_dir=rootfs
 overlay_dir=../overlay
 firmware_dir=../overlay-firmware
 
+# ── 阶段 1：基础系统（debootstrap）───────────────────────────────────────
+# 复用条件（全部满足才跳过）：目录存在且完整 + 有完成标记 + arch/release/mirror 未变。
+# 任一不满足 → 删掉 chroot 与全部状态，从头 debootstrap（即旧版默认行为）。
+BOOTSTRAP_FP="$(fp_of "arch=${arch} release=${release} mirror=${mirror}")"
+REBUILD_REASON=""
+if [[ ${FORCE_REBUILD} == 1 ]]; then
+        REBUILD_REASON="FORCE_REBUILD=1"
+elif [[ ! -d ${chroot_dir} ]]; then
+        REBUILD_REASON="chroot 目录不存在"
+elif [[ ! -x ${chroot_dir}/usr/bin/apt-get || ! -f ${chroot_dir}/etc/os-release ]]; then
+        REBUILD_REASON="chroot 目录不完整（缺 apt-get 或 os-release）"
+elif ! stage_done debootstrap; then
+        REBUILD_REASON="上次 debootstrap 未完成（无完成标记）"
+elif ! stage_fp_ok debootstrap "${BOOTSTRAP_FP}"; then
+        REBUILD_REASON="debootstrap 参数已变化（arch/release/mirror）"
+fi
+
 # Clean chroot dir and make sure folder is not mounted
+# 无论增量与否都先清残留挂载，否则 rm -rf 会失败
 umount -lf ${chroot_dir}/dev/pts 2> /dev/null || true
 umount -lf ${chroot_dir}/* 2> /dev/null || true
-rm -rf ${chroot_dir}
-mkdir -p ${chroot_dir}
+
+NEED_BOOTSTRAP=0
+if [[ -n ${REBUILD_REASON} ]]; then
+        NEED_BOOTSTRAP=1
+        echo "$(mode_of) 重建基础系统：${REBUILD_REASON}"
+        rm -rf ${chroot_dir} ${STATE_DIR}
+        mkdir -p ${chroot_dir} ${STAGE_DIR}
+else
+        echo "$(mode_of) 复用已有基础系统 ${chroot_dir}，跳过 debootstrap"
+fi
 
 # Install the base system into a directory 
-if [ -f /usr/bin/qemu-aarch64-static ]; then
-    # Run debootstrap with --foreign and copy qemu-aarch64-static
-    # for cross compile with x86_64 machine, we need sure that /usr/bin/qemu-aarch64-static has been downloaded
-    debootstrap --foreign --arch ${arch} ${release} ${chroot_dir} ${mirror}
-    sudo cp /usr/bin/qemu-aarch64-static ${chroot_dir}/usr/bin/
-    chroot ${chroot_dir} /debootstrap/debootstrap --second-stage
-else
-    # Run debootstrap without --foreign
-    debootstrap --arch "${arch}" "${release}" "${chroot_dir}" "${mirror}"
+if [[ ${NEED_BOOTSTRAP} == 1 ]]; then
+        if [ -f /usr/bin/qemu-aarch64-static ]; then
+                # Run debootstrap with --foreign and copy qemu-aarch64-static
+                # for cross compile with x86_64 machine, we need sure that /usr/bin/qemu-aarch64-static has been downloaded
+                debootstrap --foreign --arch ${arch} ${release} ${chroot_dir} ${mirror}
+                sudo cp /usr/bin/qemu-aarch64-static ${chroot_dir}/usr/bin/
+                chroot ${chroot_dir} /debootstrap/debootstrap --second-stage
+        else
+                # Run debootstrap without --foreign
+                debootstrap --arch "${arch}" "${release}" "${chroot_dir}" "${mirror}"
+        fi
+        stage_mark debootstrap "${BOOTSTRAP_FP}"
 fi
 
 # Use a more complete sources.list file 
@@ -77,6 +151,23 @@ cp ${overlay_dir}/etc/apt/preferences.d/rockchip-ppa ${chroot_dir}/etc/apt/prefe
 cp ${overlay_dir}/etc/apt/preferences.d/panfork-mesa-ppa ${chroot_dir}/etc/apt/preferences.d/panfork-mesa-ppa
 cp ${overlay_dir}/etc/apt/preferences.d/rockchip-multimedia-ppa ${chroot_dir}/etc/apt/preferences.d/rockchip-multimedia-ppa
 
+# ── 阶段 2：APT 包安装（重型，按 apt 段落自身的源码指纹跳过）──────────────
+# 指纹直接取自本脚本中 apt 段落的原文：增删任何包 / 换源 / 改移除列表，
+# 指纹都会变化并自动触发重跑，不需要在别处再维护一份包列表副本。
+APT_SRC="$(sed -n '/^# Download and update packages$/,/^EOF$/p' "${SELF_PATH}" 2>/dev/null || true)"
+if [[ -z ${APT_SRC} ]]; then
+        # 读不到自身源码（例如通过管道执行）→ 用随机值，确保每次都重跑
+        APT_SRC="$(date +%s%N) $(cat /proc/sys/kernel/random/uuid 2>/dev/null || true)"
+fi
+APT_FP="$(fp_of "${APT_SRC}")"
+APT_SKIP=0
+rm -f ${chroot_dir}/.apt-skip
+if [[ ${APT_REFRESH} != 1 ]] && stage_done apt && stage_fp_ok apt "${APT_FP}"; then
+        APT_SKIP=1
+        touch ${chroot_dir}/.apt-skip
+        echo "$(mode_of) 跳过 APT 阶段（包列表与源均未变；要拉最新包请加 APT_REFRESH=1）"
+fi
+
 # Download and update packages
 cat << EOF | chroot ${chroot_dir} /bin/bash
 set -eE 
@@ -85,14 +176,14 @@ trap 'echo Error: in $0 on line $LINENO' ERR
 
 HOST=lubancat
 
-# Create User
-useradd -G sudo -m -s /bin/bash cat
+# Create User（幂等：增量重跑时不能因 useradd 报错而中断）
+id -u cat >/dev/null 2>&1 || useradd -G sudo -m -s /bin/bash cat
 passwd cat <<IEOF
 temppwd
 temppwd
 IEOF
-gpasswd -a cat video
-gpasswd -a cat audio
+gpasswd -a cat video || true
+gpasswd -a cat audio || true
 passwd root <<IEOF
 root
 root
@@ -114,7 +205,9 @@ ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
 # add-apt-repository -y ppa:liujianfeng1994/rockchip-multimedia
 
 
-# Download and update installed packages
+# Download and update installed packages（增量模式下整段可跳过）
+if [ ! -e /.apt-skip ]; then
+echo "[apt] update / upgrade / dist-upgrade ..."
 apt-get -y update && apt-get -y upgrade && apt-get -y dist-upgrade
 
 # Download and install generic packages
@@ -126,7 +219,7 @@ net-tools wireless-tools openssh-client openssh-server wpasupplicant ifupdown \
 pigz wget curl lm-sensors bluez gdisk usb-modeswitch usb-modeswitch-data make \
 gcc libc6-dev bison libssl-dev flex fake-hwclock rfkill wireless-regdb mmc-utils \
 network-manager python3-opencv python3-pip python3-numpy python3-venv \
-cloud-initramfs-growroot locales locales-all  ntpsec-ntpdate vim chrony
+bc cloud-guest-utils cloud-initramfs-growroot locales locales-all  ntpsec-ntpdate vim chrony
 
 # Download and install kali packages
 apt-get -y install kali-linux-core kali-desktop-xfce 
@@ -140,9 +233,26 @@ apt-get -y remove cryptsetup needrestart brltty
 # Clean package cache
 # apt-get -y autoremove && apt-get -y clean && apt-get -y autoclean
 apt-get -y autoremove && apt-get -y clean
+rm -f /.apt-skip
+else
+echo "[apt] skipped (incremental: package list unchanged)"
+fi
 
 EOF
 
+rm -f ${chroot_dir}/.apt-skip   # 别把这个临时标志打进镜像
+
+if [[ ${APT_SKIP} == 1 ]]; then
+        echo "$(mode_of) APT 阶段已跳过（指纹未变）"
+else
+        stage_mark apt "${APT_FP}"
+fi
+
+# ── 阶段 3：swapfile（幂等：存在且刚好 2GB 就跳过，省掉一次 2GB dd）──────
+SWAP_BYTES="$(stat -c %s ${chroot_dir}/swapfile 2>/dev/null || echo 0)"
+if [[ "${SWAP_BYTES}" == "2147483648" ]]; then
+        echo "$(mode_of) swapfile 已存在（2GB），跳过"
+else
 # Swapfile
 cat << EOF | chroot ${chroot_dir} /bin/bash
 set -eE 
@@ -153,11 +263,19 @@ chmod 600 /tmp/swapfile
 mkswap /tmp/swapfile
 mv /tmp/swapfile /swapfile
 EOF
+fi
 
+# ── 阶段 4：仓库自带 arm64 deb（按"文件名+大小"指纹跳过）────────────────
+DEB_FP="$(fp_of "$(ls -l ../packages/arm64/*.deb 2>/dev/null | awk '{print $5, $NF}' || true)")"
+if stage_done debs && stage_fp_ok debs "${DEB_FP}"; then
+        echo "$(mode_of) 跳过 arm64 deb 安装（包未变化）"
+else
 # Install arm64 deb package
 cp -r ../packages/arm64/* ${chroot_dir}/tmp
 chroot ${chroot_dir} /bin/bash -c "dpkg -i /tmp/*.deb || true"
 rm -rf ${chroot_dir}/tmp/*
+stage_mark debs "${DEB_FP}"
+fi
 
 # Customize header content
 cp ${overlay_dir}/etc/update-motd.d/{00-header,30-sysinfo} ${chroot_dir}/etc/update-motd.d
@@ -275,7 +393,15 @@ EOF
 # EOF
 
 #add wifi firmware 
-cp -r ${firmware_dir}/usr/lib/firmware ${chroot_dir}/usr/lib/
+# ── 阶段 5：WiFi/BT firmware（按文件清单指纹跳过）───────────────────────
+FW_FP="$(fp_of "$(find ${firmware_dir}/usr/lib/firmware -type f -printf '%s %T@\n' 2>/dev/null | sort | md5sum)")"
+if stage_done firmware && stage_fp_ok firmware "${FW_FP}"; then
+        echo "$(mode_of) 跳过 firmware 拷贝（内容未变）"
+else
+        echo "$(mode_of) 拷贝 firmware -> ${chroot_dir}/usr/lib/"
+        cp -r ${firmware_dir}/usr/lib/firmware ${chroot_dir}/usr/lib/
+        stage_mark firmware "${FW_FP}"
+fi
 chroot ${chroot_dir} /bin/bash -c "ln -sf /usr/lib/firmware /lib/firmware"
 # Ensure /lib/firmware points to /usr/lib/firmware (kernel firmware search path fix)
 #chroot ${chroot_dir} /bin/bash -c "if [ ! -L /lib/firmware ]; then rm -rf /lib/firmware && ln -s /usr/lib/firmware /lib/firmware; fi"
@@ -293,143 +419,15 @@ chroot ${chroot_dir} /bin/bash -c "systemctl enable ssh"
 umount -lf ${chroot_dir}/dev/pts 2> /dev/null || true
 umount -lf ${chroot_dir}/* 2> /dev/null || true
 
+if [[ ${INCREMENTAL} == 1 ]]; then
+        echo ""
+        echo "[增量] rootfs 目录树已更新：build/rootfs/"
+        echo "       已完成阶段：$(ls ${STAGE_DIR} 2>/dev/null | tr '\n' ' ')"
+        echo "       注意：build/rootfs.img 还是旧内容，需要重新打包才会生效："
+        echo "         cd build && bash mk-image.sh rootfs && bash mk-updateimg.sh rk3588 emmc"
+fi
+
 # Tar the entire rootfs
 # [[ ${DESKTOP_ONLY} != "Y" ]] && cd ${chroot_dir} && XZ_OPT="-3 -T0" tar -cpJf ../ubuntu-22.04-server-arm64.rootfs.tar.xz . && cd ..
 [[ ${SERVER_ONLY} == "Y" ]] && exit 0
 
-# Mount the temporary API filesystems
-mkdir -p ${chroot_dir}/{proc,sys,run,dev,dev/pts}
-mount -t proc /proc ${chroot_dir}/proc
-mount -t sysfs /sys ${chroot_dir}/sys
-mount -o bind /dev ${chroot_dir}/dev
-mount -o bind /dev/pts ${chroot_dir}/dev/pts
-
-# Download and update packages
-cat << EOF | chroot ${chroot_dir} /bin/bash
-set -eE 
-trap 'echo Error: in $0 on line $LINENO' ERR
-
-# Desktop packages
-apt-get -y install ubuntu-desktop dbus-x11 xterm pulseaudio pavucontrol qtwayland5 \
-gstreamer1.0-plugins-bad gstreamer1.0-plugins-base gstreamer1.0-plugins-good mpv \
-gstreamer1.0-tools gstreamer1.0-rockchip1 chromium-browser mali-g610-firmware malirun \
-rockchip-multimedia-config librist4 librist-dev rist-tools dvb-tools ir-keytable \
-libdvbv5-0 libdvbv5-dev libdvbv5-doc libv4l-0 libv4l2rds0 libv4lconvert0 libv4l-dev \
-libv4l-rkmpp qv4l2 v4l-utils libegl-mesa0 libegl1-mesa-dev libgbm-dev guvcview \
-libgl1-mesa-dev libgles2-mesa-dev libglx-mesa0 mesa-common-dev mesa-vulkan-drivers \
-mesa-utils libwidevinecdm libcanberra-pulse gnome-software language-pack-zh-han*
-
-export LANGUAGE="zh_CN"
-export LANG="zh_CN.UTF-8"
-localedef -c -f UTF-8 -i zh_CN zh_CN.UTF-8
-locale-gen zh_CN.UTF-8
-update-locale LANG="zh_CN.UTF-8"
-
-# Install the zh_CN language support package
-apt-get -y install language-pack-gnome-zh-hant libreoffice-l10n-zh-cn libreoffice-help-zh-cn \
-fonts-arphic-uming thunderbird-locale-zh-cn gnome-user-docs-zh-hans thunderbird-locale-zh-tw \
-ibus-table-quick-classic fonts-arphic-ukai ibus-table-cangjie5 fonts-noto-cjk-extra ibus-chewing \
-thunderbird-locale-zh-hant language-pack-gnome-zh-hans ibus-table-cangjie3 ibus-table-wubi \
-thunderbird-locale-zh-hans ibus-libpinyin libreoffice-help-zh-tw libreoffice-l10n-zh-tw
-
-# Remove cloud-init and landscape-common
-apt-get -y purge cloud-init landscape-common cryptsetup-initramfs
-
-# Chromium uses fixed paths for libv4l2.so
-ln -rsf /usr/lib/*/libv4l2.so /usr/lib/
-[ -e /usr/lib/aarch64-linux-gnu/ ] && ln -Tsf lib /usr/lib64
-
-# Clean package cache
-apt-get -y autoremove && apt-get -y clean && apt-get -y autoclean
-
-EOF
-
-# Hack for GDM to restart on first HDMI hotplug
-mkdir -p ${chroot_dir}/usr/lib/scripts
-cp ${overlay_dir}/usr/lib/scripts/gdm-hack.sh ${chroot_dir}/usr/lib/scripts/gdm-hack.sh
-cp ${overlay_dir}/etc/udev/rules.d/99-gdm-hack.rules ${chroot_dir}/etc/udev/rules.d/99-gdm-hack.rules
-
-# Config file for mpv
-cp ${overlay_dir}/etc/mpv/mpv.conf ${chroot_dir}/etc/mpv/mpv.conf
-
-# Use mpv as the default video player
-sed -i 's/org\.gnome\.Totem\.desktop/mpv\.desktop/g' ${chroot_dir}/usr/share/applications/gnome-mimeapps.list
-
-# Adjust hosts file for desktop
-sed -i 's/127.0.0.1 localhost/127.0.0.1\tlocalhost.localdomain\tlocalhost\n::1\t\tlocalhost6.localdomain6\tlocalhost6/g' ${chroot_dir}/etc/hosts
-sed -i 's/::1 ip6-localhost ip6-loopback/::1     localhost ip6-localhost ip6-loopback/g' ${chroot_dir}/etc/hosts
-sed -i "/ff00::0 ip6-mcastprefix\b/d" ${chroot_dir}/etc/hosts
-
-# Config file for xorg
-mkdir -p ${chroot_dir}/etc/X11/xorg.conf.d
-cp ${overlay_dir}/etc/X11/xorg.conf.d/20-modesetting.conf ${chroot_dir}/etc/X11/xorg.conf.d/20-modesetting.conf
-
-# Networking interfaces
-cp ${overlay_dir}/etc/NetworkManager/NetworkManager.conf ${chroot_dir}/etc/NetworkManager/NetworkManager.conf
-cp ${overlay_dir}/usr/lib/NetworkManager/conf.d/10-globally-managed-devices.conf ${chroot_dir}/usr/lib/NetworkManager/conf.d/10-globally-managed-devices.conf
-cp ${overlay_dir}/usr/lib/NetworkManager/conf.d/10-override-wifi-random-mac-disable.conf ${chroot_dir}/usr/lib/NetworkManager/conf.d/10-override-wifi-random-mac-disable.conf
-cp ${overlay_dir}/usr/lib/NetworkManager/conf.d/20-override-wifi-powersave-disable.conf ${chroot_dir}/usr/lib/NetworkManager/conf.d/20-override-wifi-powersave-disable.conf
-
-# Ubuntu desktop uses a diffrent network manager, so remove this systemd override
-rm -rf ${chroot_dir}/etc/systemd/system/systemd-networkd-wait-online.service.d/override.conf
-
-# Enable wayland session
-cp ${overlay_dir}/etc/gdm3/custom.conf ${chroot_dir}/etc/gdm3/custom.conf
-
-# default image background
-rm -rf ${chroot_dir}/usr/share/backgrounds/Jammy-Jellyfish_WP_4096x2304_Grey.png
-mv ${chroot_dir}/usr/share/backgrounds/warty-final-ubuntu.png ${chroot_dir}/usr/share/backgrounds/ubuntu-default-greyscale-wallpaper.png
-cp ${overlay_dir}/warty-final-ubuntu.png ${chroot_dir}/usr/share/backgrounds/warty-final-ubuntu.png
-
-# Change startup logo
-mkdir -p  ${chroot_dir}/usr/share/plymouth/themes/spinner
-cp ${overlay_dir}/bgrt-fallback.png ${chroot_dir}/usr/share/plymouth/themes/spinner/bgrt-fallback.png
-cp ${overlay_dir}/ubuntu-logo.png ${chroot_dir}/usr/share/plymouth/ubuntu-logo.png
-cp ${overlay_dir}/ubuntu-logo-icon.png ${chroot_dir}/usr/share/pixmaps/ubuntu-logo-icon.png
-
-# Set chromium inital prefrences
-mkdir -p ${chroot_dir}/usr/lib/chromium-browser
-cp ${overlay_dir}/usr/lib/chromium-browser/initial_preferences ${chroot_dir}/usr/lib/chromium-browser/initial_preferences
-
-# Set chromium default launch args
-mkdir -p ${chroot_dir}/usr/lib/chromium-browser
-cp ${overlay_dir}/etc/chromium-browser/default ${chroot_dir}/etc/chromium-browser/default
-
-# Set chromium as default browser
-chroot ${chroot_dir} /bin/bash -c "update-alternatives --install /usr/bin/x-www-browser x-www-browser /usr/bin/chromium-browser 500"
-chroot ${chroot_dir} /bin/bash -c "update-alternatives --set x-www-browser /usr/bin/chromium-browser"
-sed -i 's/firefox-esr\.desktop/chromium-browser\.desktop/g;s/firefox\.desktop;//g' ${chroot_dir}/usr/share/applications/gnome-mimeapps.list 
-
-# Add chromium to favorites bar
-mkdir -p ${chroot_dir}/etc/dconf/db/local.d
-cp ${overlay_dir}/etc/dconf/db/local.d/00-favorite-apps ${chroot_dir}/etc/dconf/db/local.d/00-favorite-apps
-cp ${overlay_dir}/etc/dconf/profile/user ${chroot_dir}/etc/dconf/profile/user
-chroot ${chroot_dir} /bin/bash -c "dconf update"
-
-# Have plymouth use the framebuffer
-mkdir -p ${chroot_dir}/etc/initramfs-tools/conf-hooks.d
-cp ${overlay_dir}/etc/initramfs-tools/conf-hooks.d/plymouth ${chroot_dir}/etc/initramfs-tools/conf-hooks.d/plymouth
-
-# fuck tracker3
-cat << EOF | chroot ${chroot_dir} /bin/bash
-rm /usr/lib/systemd/user/tracker-*
-chmod -x /usr/libexec/tracker-* /usr/libexec/tracker3/* /usr/bin/tracker3
-rm -rf ~/.cache/tracker3
-EOF
-
-# Mouse lag/stutter (missed frames) in Wayland sessions
-# https://bugs.launchpad.net/ubuntu/+source/mutter/+bug/1982560
-echo "MUTTER_DEBUG_ENABLE_ATOMIC_KMS=0" >> ${chroot_dir}/etc/environment
-echo "MUTTER_DEBUG_FORCE_KMS_MODE=simple" >> ${chroot_dir}/etc/environment
-echo "CLUTTER_PAINT=disable-dynamic-max-render-time" >> ${chroot_dir}/etc/environment
-# ðŸ‘† If you build the 24.04 system, please comment out the code to prevent the login from getting stuck on the desktop.ðŸ˜Š
-
-# Update initramfs
-chroot ${chroot_dir} /bin/bash -c "update-initramfs -u"
-
-# Umount the temporary API filesystems
-umount -lf ${chroot_dir}/dev/pts 2> /dev/null || true
-umount -lf ${chroot_dir}/* 2> /dev/null || true
-
-# Tar the entire rootfs
-cd ${chroot_dir} && XZ_OPT="-3 -T0" tar -cpJf ../ubuntu-22.04-desktop-arm64.rootfs.tar.xz . && cd ..

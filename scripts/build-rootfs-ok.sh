@@ -12,9 +12,12 @@ cd "$(dirname -- "$(readlink -f -- "$0")")" && cd ..
 mkdir -p build && cd build
 
 
-if [[ -f ubuntu-22.04-server-arm64.rootfs.tar.xz && -f ubuntu-22.04-desktop-arm64.rootfs.tar.xz ]]; then
+# 断点续传：mk-image.sh 的产物 rootfs.img 已存在则跳过整套构建。
+# 需要强制重建时：rm -f build/rootfs.img（或删掉整个 build/ 目录）后重跑。
+if [[ -f rootfs.img ]]; then
+        echo "rootfs.img already exists, skipping build. (rm build/rootfs.img to force rebuild)"
         exit 0
-    fi
+fi
 
 
 # These env vars can cause issues with chroot
@@ -35,6 +38,7 @@ mirror=https://mirrors.aliyun.com/kali/
 # mirror=https://mirrors.ustc.edu.cn/ubuntu-ports/
 chroot_dir=rootfs
 overlay_dir=../overlay
+firmware_dir=../overlay-firmware
 
 # Clean chroot dir and make sure folder is not mounted
 umount -lf ${chroot_dir}/dev/pts 2> /dev/null || true
@@ -152,7 +156,7 @@ EOF
 
 # Install arm64 deb package
 cp -r ../packages/arm64/* ${chroot_dir}/tmp
-chroot ${chroot_dir} /bin/bash -c "dpkg -i /tmp/*.deb"
+chroot ${chroot_dir} /bin/bash -c "dpkg -i /tmp/*.deb || true"
 rm -rf ${chroot_dir}/tmp/*
 
 # Customize header content
@@ -201,16 +205,17 @@ chroot ${chroot_dir} /bin/bash -c "systemctl enable cpu-governor-performance"
 cp ${overlay_dir}/usr/lib/systemd/system/gpu-governor-performance.service ${chroot_dir}/usr/lib/systemd/system/gpu-governor-performance.service
 chroot ${chroot_dir} /bin/bash -c "systemctl enable gpu-governor-performance"
 
-# add boot_init
+# add initial service
 cp ${overlay_dir}/usr/local/boot_init.sh ${chroot_dir}/usr/local
+cp ${overlay_dir}/usr/local/linux-image.deb ${chroot_dir}/usr/local
 chroot ${chroot_dir} /bin/bash -c "chmod +x /usr/local/boot_init.sh"
-#cp ${overlay_dir}/etc/init.d/boot_init.sh ${chroot_dir}/etc/init.d/
-#chroot ${chroot_dir} /bin/bash -c "chmod +x /etc/init.d/boot_init.sh"
 
-#chroot ${chroot_dir} /bin/bash -c "systemctl enable boot_init"
 
 cp ${overlay_dir}/usr/lib/systemd/system/boot_init.service ${chroot_dir}/usr/lib/systemd/system/
 chroot ${chroot_dir} /bin/bash -c "systemctl enable boot_init"
+
+cp ${overlay_dir}/usr/lib/systemd/system/kernel-install.service ${chroot_dir}/usr/lib/systemd/system/
+chroot ${chroot_dir} /bin/bash -c "systemctl enable kernel-install"
 
 
 # Add realtek bluetooth firmware to initrd 
@@ -269,8 +274,13 @@ EOF
 
 # EOF
 
+#add wifi firmware 
+cp -r ${firmware_dir}/usr/lib/firmware ${chroot_dir}/usr/lib/
+chroot ${chroot_dir} /bin/bash -c "ln -sf /usr/lib/firmware /lib/firmware"
+# Ensure /lib/firmware points to /usr/lib/firmware (kernel firmware search path fix)
+#chroot ${chroot_dir} /bin/bash -c "if [ ! -L /lib/firmware ]; then rm -rf /lib/firmware && ln -s /usr/lib/firmware /lib/firmware; fi"
 
-
+#enable ntp 
 cp ${overlay_dir}/etc/chrony/chrony.conf ${chroot_dir}/etc/chrony/
 chroot ${chroot_dir} /bin/bash -c "systemctl enable chrony"
 
@@ -284,142 +294,6 @@ umount -lf ${chroot_dir}/dev/pts 2> /dev/null || true
 umount -lf ${chroot_dir}/* 2> /dev/null || true
 
 # Tar the entire rootfs
-[[ ${DESKTOP_ONLY} != "Y" ]] && cd ${chroot_dir} && XZ_OPT="-3 -T0" tar -cpJf ../ubuntu-22.04-server-arm64.rootfs.tar.xz . && cd ..
+# [[ ${DESKTOP_ONLY} != "Y" ]] && cd ${chroot_dir} && XZ_OPT="-3 -T0" tar -cpJf ../ubuntu-22.04-server-arm64.rootfs.tar.xz . && cd ..
 [[ ${SERVER_ONLY} == "Y" ]] && exit 0
 
-# Mount the temporary API filesystems
-mkdir -p ${chroot_dir}/{proc,sys,run,dev,dev/pts}
-mount -t proc /proc ${chroot_dir}/proc
-mount -t sysfs /sys ${chroot_dir}/sys
-mount -o bind /dev ${chroot_dir}/dev
-mount -o bind /dev/pts ${chroot_dir}/dev/pts
-
-# Download and update packages
-cat << EOF | chroot ${chroot_dir} /bin/bash
-set -eE 
-trap 'echo Error: in $0 on line $LINENO' ERR
-
-# Desktop packages
-apt-get -y install ubuntu-desktop dbus-x11 xterm pulseaudio pavucontrol qtwayland5 \
-gstreamer1.0-plugins-bad gstreamer1.0-plugins-base gstreamer1.0-plugins-good mpv \
-gstreamer1.0-tools gstreamer1.0-rockchip1 chromium-browser mali-g610-firmware malirun \
-rockchip-multimedia-config librist4 librist-dev rist-tools dvb-tools ir-keytable \
-libdvbv5-0 libdvbv5-dev libdvbv5-doc libv4l-0 libv4l2rds0 libv4lconvert0 libv4l-dev \
-libv4l-rkmpp qv4l2 v4l-utils libegl-mesa0 libegl1-mesa-dev libgbm-dev guvcview \
-libgl1-mesa-dev libgles2-mesa-dev libglx-mesa0 mesa-common-dev mesa-vulkan-drivers \
-mesa-utils libwidevinecdm libcanberra-pulse gnome-software language-pack-zh-han*
-
-export LANGUAGE="zh_CN"
-export LANG="zh_CN.UTF-8"
-localedef -c -f UTF-8 -i zh_CN zh_CN.UTF-8
-locale-gen zh_CN.UTF-8
-update-locale LANG="zh_CN.UTF-8"
-
-# Install the zh_CN language support package
-apt-get -y install language-pack-gnome-zh-hant libreoffice-l10n-zh-cn libreoffice-help-zh-cn \
-fonts-arphic-uming thunderbird-locale-zh-cn gnome-user-docs-zh-hans thunderbird-locale-zh-tw \
-ibus-table-quick-classic fonts-arphic-ukai ibus-table-cangjie5 fonts-noto-cjk-extra ibus-chewing \
-thunderbird-locale-zh-hant language-pack-gnome-zh-hans ibus-table-cangjie3 ibus-table-wubi \
-thunderbird-locale-zh-hans ibus-libpinyin libreoffice-help-zh-tw libreoffice-l10n-zh-tw
-
-# Remove cloud-init and landscape-common
-apt-get -y purge cloud-init landscape-common cryptsetup-initramfs
-
-# Chromium uses fixed paths for libv4l2.so
-ln -rsf /usr/lib/*/libv4l2.so /usr/lib/
-[ -e /usr/lib/aarch64-linux-gnu/ ] && ln -Tsf lib /usr/lib64
-
-# Clean package cache
-apt-get -y autoremove && apt-get -y clean && apt-get -y autoclean
-
-EOF
-
-# Hack for GDM to restart on first HDMI hotplug
-mkdir -p ${chroot_dir}/usr/lib/scripts
-cp ${overlay_dir}/usr/lib/scripts/gdm-hack.sh ${chroot_dir}/usr/lib/scripts/gdm-hack.sh
-cp ${overlay_dir}/etc/udev/rules.d/99-gdm-hack.rules ${chroot_dir}/etc/udev/rules.d/99-gdm-hack.rules
-
-# Config file for mpv
-cp ${overlay_dir}/etc/mpv/mpv.conf ${chroot_dir}/etc/mpv/mpv.conf
-
-# Use mpv as the default video player
-sed -i 's/org\.gnome\.Totem\.desktop/mpv\.desktop/g' ${chroot_dir}/usr/share/applications/gnome-mimeapps.list
-
-# Adjust hosts file for desktop
-sed -i 's/127.0.0.1 localhost/127.0.0.1\tlocalhost.localdomain\tlocalhost\n::1\t\tlocalhost6.localdomain6\tlocalhost6/g' ${chroot_dir}/etc/hosts
-sed -i 's/::1 ip6-localhost ip6-loopback/::1     localhost ip6-localhost ip6-loopback/g' ${chroot_dir}/etc/hosts
-sed -i "/ff00::0 ip6-mcastprefix\b/d" ${chroot_dir}/etc/hosts
-
-# Config file for xorg
-mkdir -p ${chroot_dir}/etc/X11/xorg.conf.d
-cp ${overlay_dir}/etc/X11/xorg.conf.d/20-modesetting.conf ${chroot_dir}/etc/X11/xorg.conf.d/20-modesetting.conf
-
-# Networking interfaces
-cp ${overlay_dir}/etc/NetworkManager/NetworkManager.conf ${chroot_dir}/etc/NetworkManager/NetworkManager.conf
-cp ${overlay_dir}/usr/lib/NetworkManager/conf.d/10-globally-managed-devices.conf ${chroot_dir}/usr/lib/NetworkManager/conf.d/10-globally-managed-devices.conf
-cp ${overlay_dir}/usr/lib/NetworkManager/conf.d/10-override-wifi-random-mac-disable.conf ${chroot_dir}/usr/lib/NetworkManager/conf.d/10-override-wifi-random-mac-disable.conf
-cp ${overlay_dir}/usr/lib/NetworkManager/conf.d/20-override-wifi-powersave-disable.conf ${chroot_dir}/usr/lib/NetworkManager/conf.d/20-override-wifi-powersave-disable.conf
-
-# Ubuntu desktop uses a diffrent network manager, so remove this systemd override
-rm -rf ${chroot_dir}/etc/systemd/system/systemd-networkd-wait-online.service.d/override.conf
-
-# Enable wayland session
-cp ${overlay_dir}/etc/gdm3/custom.conf ${chroot_dir}/etc/gdm3/custom.conf
-
-# default image background
-rm -rf ${chroot_dir}/usr/share/backgrounds/Jammy-Jellyfish_WP_4096x2304_Grey.png
-mv ${chroot_dir}/usr/share/backgrounds/warty-final-ubuntu.png ${chroot_dir}/usr/share/backgrounds/ubuntu-default-greyscale-wallpaper.png
-cp ${overlay_dir}/warty-final-ubuntu.png ${chroot_dir}/usr/share/backgrounds/warty-final-ubuntu.png
-
-# Change startup logo
-mkdir -p  ${chroot_dir}/usr/share/plymouth/themes/spinner
-cp ${overlay_dir}/bgrt-fallback.png ${chroot_dir}/usr/share/plymouth/themes/spinner/bgrt-fallback.png
-cp ${overlay_dir}/ubuntu-logo.png ${chroot_dir}/usr/share/plymouth/ubuntu-logo.png
-cp ${overlay_dir}/ubuntu-logo-icon.png ${chroot_dir}/usr/share/pixmaps/ubuntu-logo-icon.png
-
-# Set chromium inital prefrences
-mkdir -p ${chroot_dir}/usr/lib/chromium-browser
-cp ${overlay_dir}/usr/lib/chromium-browser/initial_preferences ${chroot_dir}/usr/lib/chromium-browser/initial_preferences
-
-# Set chromium default launch args
-mkdir -p ${chroot_dir}/usr/lib/chromium-browser
-cp ${overlay_dir}/etc/chromium-browser/default ${chroot_dir}/etc/chromium-browser/default
-
-# Set chromium as default browser
-chroot ${chroot_dir} /bin/bash -c "update-alternatives --install /usr/bin/x-www-browser x-www-browser /usr/bin/chromium-browser 500"
-chroot ${chroot_dir} /bin/bash -c "update-alternatives --set x-www-browser /usr/bin/chromium-browser"
-sed -i 's/firefox-esr\.desktop/chromium-browser\.desktop/g;s/firefox\.desktop;//g' ${chroot_dir}/usr/share/applications/gnome-mimeapps.list 
-
-# Add chromium to favorites bar
-mkdir -p ${chroot_dir}/etc/dconf/db/local.d
-cp ${overlay_dir}/etc/dconf/db/local.d/00-favorite-apps ${chroot_dir}/etc/dconf/db/local.d/00-favorite-apps
-cp ${overlay_dir}/etc/dconf/profile/user ${chroot_dir}/etc/dconf/profile/user
-chroot ${chroot_dir} /bin/bash -c "dconf update"
-
-# Have plymouth use the framebuffer
-mkdir -p ${chroot_dir}/etc/initramfs-tools/conf-hooks.d
-cp ${overlay_dir}/etc/initramfs-tools/conf-hooks.d/plymouth ${chroot_dir}/etc/initramfs-tools/conf-hooks.d/plymouth
-
-# fuck tracker3
-cat << EOF | chroot ${chroot_dir} /bin/bash
-rm /usr/lib/systemd/user/tracker-*
-chmod -x /usr/libexec/tracker-* /usr/libexec/tracker3/* /usr/bin/tracker3
-rm -rf ~/.cache/tracker3
-EOF
-
-# Mouse lag/stutter (missed frames) in Wayland sessions
-# https://bugs.launchpad.net/ubuntu/+source/mutter/+bug/1982560
-echo "MUTTER_DEBUG_ENABLE_ATOMIC_KMS=0" >> ${chroot_dir}/etc/environment
-echo "MUTTER_DEBUG_FORCE_KMS_MODE=simple" >> ${chroot_dir}/etc/environment
-echo "CLUTTER_PAINT=disable-dynamic-max-render-time" >> ${chroot_dir}/etc/environment
-# ðŸ‘† If you build the 24.04 system, please comment out the code to prevent the login from getting stuck on the desktop.ðŸ˜Š
-
-# Update initramfs
-chroot ${chroot_dir} /bin/bash -c "update-initramfs -u"
-
-# Umount the temporary API filesystems
-umount -lf ${chroot_dir}/dev/pts 2> /dev/null || true
-umount -lf ${chroot_dir}/* 2> /dev/null || true
-
-# Tar the entire rootfs
-cd ${chroot_dir} && XZ_OPT="-3 -T0" tar -cpJf ../ubuntu-22.04-desktop-arm64.rootfs.tar.xz . && cd ..

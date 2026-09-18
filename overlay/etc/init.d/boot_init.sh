@@ -191,11 +191,11 @@ board_info() {
 # 0.8056640625 3.3v/12bit
 get_index(){
 
-	ADC_RAW=$(cat /sys/bus/iio/devices/iio\:device0/in_voltage${1}_raw)
+	ADC_RAW=$(cat /sys/bus/iio/devices/iio\:device0/in_voltage${1}_raw 2>/dev/null || echo 0)
 	echo ADC_CH:$1 ADC_RAW:$ADC_RAW
 	INDEX=0xff
 
-	if [ $(echo "$ADC_voltage_scale > 1 "|bc) -eq 1 ] ; then
+	if awk -v s="$ADC_voltage_scale" 'BEGIN{exit !(s > 1)}' ; then
 		declare -a ADC_INDEX=(229 344 460 595 732 858 975 1024)
 	else
 		declare -a ADC_INDEX=(916 1376 1840 2380 2928 3432 3900 4096)
@@ -210,7 +210,7 @@ get_index(){
 }
 
 board_id() {
-	ADC_voltage_scale=$(cat /sys/bus/iio/devices/iio\:device0/in_voltage_scale)
+	ADC_voltage_scale=$(cat /sys/bus/iio/devices/iio\:device0/in_voltage_scale 2>/dev/null || echo 0)
 	echo "ADC_voltage_scale:"$ADC_voltage_scale
 
 	SOC_type=$(cat /proc/device-tree/compatible | cut -d,  -f 3 | sed 's/\x0//g')
@@ -281,17 +281,45 @@ fi
 if [ ! -e "/boot/boot_dilatation_init" ] ;
    then
 
-   #转换MBR -> GPT分区表
-   sgdisk -e /dev/mmcblk0
+   #转换MBR -> GPT分区表（失败不致命）
+   sgdisk -e /dev/mmcblk0 || true
 
-   #修改/dev/mmcblk0p3根文件系统分区空间配置
-   printf 'yes\n-1\nyes' | parted /dev/mmcblk0 resizepart 3 ---pretend-input-tty
+   #扩展根分区：优先 growpart（非交互、支持在线分区），退化为 parted -s。
+   #原来的 printf|parted ---pretend-input-tty 会被部分 parted 版本拒绝
+   #（"Error: Invalid number."），非零返回被 set -e 捕获后脚本直接退出，
+   #导致 resize2fs / touch / reboot 全部执行不到。
+   if command -v growpart >/dev/null 2>&1; then
+      growpart /dev/mmcblk0 3 || parted -s /dev/mmcblk0 resizepart 3 100% || true
+   else
+      parted -s /dev/mmcblk0 resizepart 3 100% || true
+   fi
+
+   #刷新内核分区表（在用的分区用 partx -u），否则 resize2fs 看不到新大小
+   partprobe /dev/mmcblk0 2>/dev/null || partx -u /dev/mmcblk0 2>/dev/null || true
 
    #根据配置重新分配空间
-   resize2fs /dev/mmcblk0p3
+   resize2fs /dev/mmcblk0p3 || true
 
-   #创建判断文件，第二次启动存在该文件不再执行此扩容
-   touch /boot/boot_dilatation_init
-   systemctl enable ssh
-   reboot
+	#创建判断文件，第二次启动存在该文件不再执行此扩容
+	touch /boot/boot_dilatation_init
+
+	# 等待首启内核 deb 安装完成，再重启（避免重启打断 dpkg 造成半安装）
+	if systemctl is-enabled --quiet kernel-install.service 2>/dev/null; then
+		systemctl start kernel-install.service || true
+	fi
+
+	# set -e 下任何非零返回都会静默中止脚本，导致 reboot 根本执行不到
+	systemctl enable ssh || true
+
+	# 不能直接用 `reboot`：脚本由 systemd 服务(或 SysV 兼容单元)承载时，
+	# 阻塞式 reboot 会自锁——重启事务要求先停止承载本脚本的服务，而脚本
+	# 进程正阻塞在 reboot 里等待重启完成，重启因此永远不会发生
+	# （首次开机不自动重启的根因）。--no-block 立即返回，重启交给
+	# systemd 异步执行。
+	sync
+	if [ -d /run/systemd/system ]; then
+		systemctl --no-block reboot
+	else
+		reboot
+	fi
 fi

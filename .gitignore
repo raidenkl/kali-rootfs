@@ -3,6 +3,7 @@
 
 # 构建产物
 build/rootfs/
+build/.build-state/
 build/*.tar
 build/*.tar.*
 build/*.img

@@ -276,9 +276,12 @@ fi
 
 ---
 
-## 五、`build-rootfs.sh` 的唯一改动
+## 五、`build-rootfs.sh` 的改动
 
-**第 15-17 行**，其余一行不动。
+共两处（行号会随改动漂移，以内容为准）：
+
+1. **断点续传短路**：`rootfs.img` 存在即整套跳过（原逻辑判断两个永不生成的
+   `*.tar.xz`，恒为假）。
 
 **改动前**（判断恒为假 —— 第 294 行 tar 被注释、第 295 行 `SERVER_ONLY=Y` 时提前 `exit 0`，两个 tar.xz 永远不会生成）：
 
@@ -387,26 +390,43 @@ sudo dd if=build/rootfs.img of=/dev/mmcblk0pX bs=1M status=progress conv=fsync
 
 `build-rootfs.sh` 第 144-152 行在 chroot 内 `dd` 一个 2GB swapfile。这是原脚本行为，未改。
 
-### 7.4 desktop 变体当前不可达
 
-`build-rootfs.sh` 第 29 行 `SERVER_ONLY=Y`，第 295 行 `[[ ${SERVER_ONLY} == "Y" ]] && exit 0` 会提前退出，第 297 行之后的 desktop 分支**永远不会执行**。
 
-如需 desktop：
-
-1. 改第 29 行为 `SERVER_ONLY=N`
-2. 注意第 432 行 `tar -cpJf ../ubuntu-22.04-desktop-arm64.rootfs.tar.xz .` 会**额外产出 8GB 的 tar.xz**，与「只产 img」目标冲突，建议一并注释掉
-
-### 7.5 断点续传的粒度
+### 7.4 断点续传与增量构建
 
 | 情况 | 行为 |
 |---|---|
-| `build/rootfs.img` 存在 | `build-rootfs.sh` 短路跳过，直接重新打包 img |
-| 想跳过 img 重打包 | 当前不支持（`mk-image.sh` 每次都重做） |
-| 想全量重建 | `FORCE_REBUILD=1` 或 `rm -f build/rootfs.img` |
+| `build/rootfs.img` 存在（默认） | `build-rootfs.sh` 短路跳过整套构建 |
+| 想全量重建 | `FORCE_REBUILD=1`（或 `rm -f build/rootfs.img`） |
+| 想跳过 img 重打包 | 不重跑 `build-rootfs.sh`，直接 `bash build/mk-image.sh rootfs` |
+| 只更新定制内容（overlay / 脚本 / 配置） | `INCREMENTAL=1`，见下 |
 
-注意：`build-rootfs.sh` 第 43 行有 `rm -rf ${chroot_dir}`，所以一旦进入构建流程，rootfs 目录树**总是**从头重建。
+**增量模式（`INCREMENTAL=1`）**：把构建拆成「重型阶段」与「廉价阶段」，
+重型阶段用「完成标记 + 输入指纹」判断能否跳过，廉价阶段每次必跑。
 
-### 7.6 产物路径与 `.dockerignore`
+| 阶段 | 开销 | 复用判据（输入变了自动失效重跑） |
+|---|---|---|
+| debootstrap | 10~40 min | `arch/release/mirror` 指纹 |
+| apt（upgrade + 全部包 + full-upgrade + remove） | 30~60 min | **apt 段落的源码指纹**（增删包、换源即失效） |
+| swapfile（2GB dd） | ~10 s | chroot 内 `/swapfile` 存在且正好 2GB |
+| `packages/arm64/*.deb` | 秒级 | 文件名 + 大小指纹 |
+| `overlay-firmware` | 视体积 | 文件清单（大小 + mtime）指纹 |
+| **overlay 拷贝 / 服务使能 / 配置覆写** | **秒级** | **每次必跑** —— 这正是增量要更新的部分 |
+
+```bash
+bash scripts/build-rootfs.sh --incremental                  # 增量
+APT_REFRESH=1 bash scripts/build-rootfs.sh --incremental    # 增量 + 拉最新软件包
+bash scripts/build-rootfs.sh --force                        # 回到全量
+
+# 容器里加一层环境变量（EXTRA_RUN_ARGS 是 build.sh 已有的透传口）
+EXTRA_RUN_ARGS='-e INCREMENTAL=1' bash build/docker/build.sh
+```
+
+状态放在 `build/.build-state/`（阶段标记 `stages/*.done` + 指纹 `stages/*.fp`）：
+**删掉它即等于全量重建**；`FORCE_REBUILD=1 / --force` 会自动删。
+
+
+### 7.5 产物路径与 `.dockerignore`
 
 仓库根的 `.dockerignore` 已忽略 `build/rootfs/` 和 `build/*.img`。这仅在**构建镜像本身**时生效（防止把 10GB 产物送进 daemon），对本方案的挂载式构建无影响。
 
