@@ -7,6 +7,9 @@ After=local-fs.target
 [Service]
 Type=simple
 ExecStart=/usr/local/boot_init.sh
+# 首启初始化进度直接打到串口控制台（默认只进 journal，串口上像"卡死"）
+StandardOutput=journal+console
+StandardError=journal+console
 
 [Install]
 WantedBy=sysinit.target

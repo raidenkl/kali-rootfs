@@ -9,6 +9,9 @@ ExecStart=dpkg -i /usr/local/linux-image.deb
 ExecStart=touch /boot/.linux-image-installed
 ExecStartPost=systemctl disable kernel-install.service
 RemainAfterExit=yes
+# 内核 deb 安装（含 update-initramfs）进度打到串口控制台，便于观察首启
+StandardOutput=journal+console
+StandardError=journal+console
 
 [Install]
 WantedBy=local-fs.target

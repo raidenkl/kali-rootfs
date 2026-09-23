@@ -278,10 +278,15 @@ fi
 
 ## 五、`build-rootfs.sh` 的改动
 
-共两处（行号会随改动漂移，以内容为准）：
+共三处（行号会随改动漂移，以内容为准）：
 
 1. **断点续传短路**：`rootfs.img` 存在即整套跳过（原逻辑判断两个永不生成的
    `*.tar.xz`，恒为假）。
+2. **增量构建开关**：`INCREMENTAL=1 / FORCE_REBUILD=1 / APT_REFRESH=1`，详见 7.4。
+   另：apt 列表显式加入 `bc`（首启脚本与内核 deb postinst 都依赖）、
+   `cloud-guest-utils`（growpart）。
+3. **日志/时钟策略**：journal 易失 + journal-flush 超时兜底 + fake-hwclock 提前
+   恢复；删除 `rtc-hym8563.service`。详见 7.6。
 
 **改动前**（判断恒为假 —— 第 294 行 tar 被注释、第 295 行 `SERVER_ONLY=Y` 时提前 `exit 0`，两个 tar.xz 永远不会生成）：
 
@@ -429,6 +434,45 @@ EXTRA_RUN_ARGS='-e INCREMENTAL=1' bash build/docker/build.sh
 ### 7.5 产物路径与 `.dockerignore`
 
 仓库根的 `.dockerignore` 已忽略 `build/rootfs/` 和 `build/*.img`。这仅在**构建镜像本身**时生效（防止把 10GB 产物送进 daemon），对本方案的挂载式构建无影响。
+
+---
+
+### 7.6 首次开机流程与日志策略（重要）
+
+**两段式首启是设计行为**：烧录后的第一次开机不会出现登录提示。
+
+| 开机 | 发生什么 |
+|---|---|
+| boot #1 | `boot_init.service`（sysinit 阶段）：挂载 p2→/boot 并写入 fstab、建 rk-kernel.dtb/uEnv.txt 软链、扩容 p3（sgdisk/growpart/resize2fs，已改为"fs 已满分区则跳过"）、等 `kernel-install.service`（dpkg 安装内核 deb）→ `systemctl --no-block reboot` |
+| boot #2 | 一切就绪：multi-user → 登录界面（getty/lightdm） |
+
+**boot #2 曾卡死的根因**（2026-09 排查）：板卡**无 RTC 电池**，开机时钟被拨回
+systemd 内置 epoch（2026-07-24 02:31:52）；跨开机持久化 journal 的最后条目总是
+"未来时间"，journald 启动即 `realtime clock jumped backwards → rotating`，并卡死
+`systemd-journal-flush`（oneshot 默认无启动超时）⇒ `sysinit.target` 永不完成 ⇒
+无登录界面。断电重启后 journald 把损坏的 journal 改名重建、跳过 rotate，于是
+"第二次开机就好了"。
+
+**已落地的修复**：
+
+1. `etc/systemd/journald.conf.d/10-volatile.conf`：`Storage=volatile` —— 不存在跨开机
+   journal，对时钟回拨免疫。代价：重启后无 `journalctl -b -1`，诊断靠串口输出与
+   ramoops/pstore。
+2. `etc/systemd/system/systemd-journal-flush.service.d/override.conf`：
+   `TimeoutStartSec=30` —— 即使 journald 异常也最多卡 30s 就放行 sysinit。
+3. `etc/systemd/system/fake-hwclock.service.d/override.conf`：时钟恢复（eMMC 持久化）
+   提前到 journald 之前；`chrony.conf` 已有 `rtcsync`（RTC 会在有电时被校正，但
+   **无电池、断电后不可靠**，不能作为唯一防线）。
+4. `boot_init.service` / `kernel-install.service` 增加 `StandardOutput/Error=journal+console`；
+   `boot_init.sh` 每阶段向串口打 `[boot_init] …` 进度、失败时打印行号 ⇒ 首启全程可观测。
+5. `rtc-hym8563.service` 已删除：依赖的 `hwclock` 不在镜像里，且内核探测 RTC 时已自动
+   设置系统时钟，功能重复。`chrony.conf` 保留 `rtcsync`（有电场景维持 RTC 正确）。
+
+**如需临时恢复持久日志**：删除
+`overlay/etc/systemd/journald.conf.d/10-volatile.conf`（板上为
+`/etc/systemd/journald.conf.d/10-volatile.conf`）→
+`mkdir -p /var/log/journal && systemctl restart systemd-journald`。
+前提：已用 rtcsync/fake-hwclock 保证时钟单调，否则会复现 boot #2 的卡死。
 
 ---
 

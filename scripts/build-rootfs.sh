@@ -339,8 +339,19 @@ chroot ${chroot_dir} /bin/bash -c "systemctl enable kernel-install"
 # Add realtek bluetooth firmware to initrd 
 cp ${overlay_dir}/usr/share/initramfs-tools/hooks/rtl-bt ${chroot_dir}/usr/share/initramfs-tools/hooks/rtl-bt
 
-# Service to synchronise system clock to hardware RTC
-cp ${overlay_dir}/usr/lib/systemd/system/rtc-hym8563.service ${chroot_dir}/usr/lib/systemd/system/rtc-hym8563.service
+# ── 日志/时钟策略（详见 build/docker/README.md「首次开机流程与日志策略」）────
+# 背景：板卡无 RTC 电池，每次开机时钟被拨回 systemd 内置 epoch；跨开机的
+# 持久化 journal 会触发 journald "realtime clock jumped backwards -> rotate"，
+# 曾把 sysinit 卡死导致第二次开机无登录界面。故：journal 易失 + flush 超时
+# 兜底 + fake-hwclock 提前恢复。（rtc-hym8563.service 已删除：其依赖的
+# hwclock 镜像里不存在，且内核探测 RTC 时已自动设置系统时钟，功能重复。）
+mkdir -p ${chroot_dir}/etc/systemd/journald.conf.d/
+cp ${overlay_dir}/etc/systemd/journald.conf.d/10-volatile.conf ${chroot_dir}/etc/systemd/journald.conf.d/10-volatile.conf
+mkdir -p ${chroot_dir}/etc/systemd/system/systemd-journal-flush.service.d/
+cp ${overlay_dir}/etc/systemd/system/systemd-journal-flush.service.d/override.conf ${chroot_dir}/etc/systemd/system/systemd-journal-flush.service.d/override.conf
+mkdir -p ${chroot_dir}/etc/systemd/system/fake-hwclock.service.d/
+cp ${overlay_dir}/etc/systemd/system/fake-hwclock.service.d/override.conf ${chroot_dir}/etc/systemd/system/fake-hwclock.service.d/override.conf
+chroot ${chroot_dir} /bin/bash -c "systemctl enable fake-hwclock.service 2>/dev/null || true"
 
 # Modify service timeout
 cp ${overlay_dir}/usr/lib/systemd/system/NetworkManager-wait-online.service ${chroot_dir}/usr/lib/systemd/system/NetworkManager-wait-online.service
@@ -376,6 +387,9 @@ cp ${overlay_dir}/usr/bin/ubuntu-rockchip-install ${chroot_dir}/usr/bin/ubuntu-r
 # Let systemd create machine id on first boot
 rm -f ${chroot_dir}/var/lib/dbus/machine-id
 true > ${chroot_dir}/etc/machine-id
+
+# journal 已改为易失（见上方日志/时钟策略），镜像里不携带构建期的持久 journal 目录
+rm -rf ${chroot_dir}/var/log/journal
 
 # configure the default apps
 cat >> ${chroot_dir}/etc/profile<< EOF
