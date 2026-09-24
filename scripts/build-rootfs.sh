@@ -622,12 +622,14 @@ chroot ${chroot_dir} /bin/bash -c "chmod +x /usr/local/boot_init.sh"
 cp ${overlay_dir}/usr/lib/systemd/system/boot_init.service ${chroot_dir}/usr/lib/systemd/system/
 chroot ${chroot_dir} /bin/bash -c "systemctl enable boot_init"
 
-# ── 内核 modules 固化（参考 LubanCat SDK 通道 A：chroot 装 deb → 清 /boot → 只留 /lib/modules）──
-# 背景：/boot（来自 build/firmware/boot.img）与 rootfs 的 /lib/modules 必须出自
-# 【同一次内核编译】。旧做法是首启 kernel-install.service 装 deb，曾把 /boot 的
-# #12 内核降级成 deb 里的 #11（换内核构建后忘了同步 deb），第二次开机卡死在
-# lightdm 之前。现在改为构建期安装：modules 固化进 rootfs.img；deb 自带的
-# boot/（Image/dtb/uEnv）在装完后整段丢弃，绝不允许它覆盖 /boot。
+# ── 内核 modules 固化：deb 只用作 modules 源（dpkg-deb -x，绝不触碰 /boot）──
+# 背景：/boot 来自 build/firmware/boot.img（用户维护），rootfs 的 /lib/modules
+# 来自 deb。deb 里还带着自己的 Image/dtb/uEnv —— 曾因首启安装它而把 /boot 的
+# #12 内核降级成 #11（第二次开机卡死）。现在改为构建期只解包 lib/modules，
+# /boot 从头到尾不被触碰，deb 自带的 boot/ 部分直接丢弃。
+# 编译号说明：deb 与 boot.img 非同一次构建时（SDK 分步打包常见），只要 release
+# 串一致（如 6.1.99-rk3588），模块 vermagic 相同即可正常 modprobe —— 见下方
+# WARN 提示；只有跨内核版本/跨配置才是真问题。
 # 注意：本阶段指纹只含 deb 的大小/时间，不含本段脚本正文 —— 改了下面命令后
 # 必须 rm -f ${STAGE_DIR}/kmod.* 才会重跑（与 firmware 阶段同一惯例）。
 KMOD_VER=6.1.99-rk3588
@@ -637,25 +639,23 @@ if stage_done kmod && stage_fp_ok kmod "${KMOD_FP}"; then
 else
         KMOD_FATAL=0
         kmod_fatal() { echo "[kmod][FATAL] $*"; KMOD_FATAL=1; }
+        kmod_warn()  { echo "[kmod][WARN] $*"; }
 
-        # ① deb 拷进 chroot 的 /boot/kerneldeb（SDK mk-ubuntu-rootfs.sh:151 同款 staging）
-        rm -rf ${chroot_dir}/boot/kerneldeb
-        mkdir -p ${chroot_dir}/boot/kerneldeb
-        cp -f ${overlay_dir}/usr/local/linux-image.deb ${chroot_dir}/boot/kerneldeb/
-        # ② chroot 内安装（postinst 跑 depmod；update-initramfs 失败不致命：
-        #    启动链路 boot.cmd 直接挂 Image，不用 initrd，且 /boot 随后被清空）
-        chroot ${chroot_dir} /bin/bash -c \
-          "apt-get install -y --no-install-recommends /boot/kerneldeb/*.deb || dpkg -i /boot/kerneldeb/*.deb" \
-          || echo "[kmod] 安装输出含错误，交由下方自证判定"
-        # ③ 清 /boot（SDK mk-ubuntu-rootfs.sh:345 同款）——模块在 /lib/modules，不受影响
-        rm -rf ${chroot_dir}/boot/* ${chroot_dir}/boot/kerneldeb
-        # ④ 防 apt 误动（Kali 源里没有这个包，纯保险）
-        chroot ${chroot_dir} /bin/bash -c "apt-mark hold linux-image-${KMOD_VER}" 2>/dev/null || true
+        # ① 只解包 lib/modules 到临时目录（deb 里的 boot/ 等其余内容全部忽略）
+        rm -rf ${chroot_dir}/tmp/kmod && mkdir -p ${chroot_dir}/tmp/kmod
+        dpkg-deb -x ${overlay_dir}/usr/local/linux-image.deb ${chroot_dir}/tmp/kmod
+        # ② 整目录替换，避免新旧 deb 的模块混装
+        rm -rf ${chroot_dir}/lib/modules/${KMOD_VER}
+        mkdir -p ${chroot_dir}/lib/modules
+        cp -a ${chroot_dir}/tmp/kmod/lib/modules/. ${chroot_dir}/lib/modules/
+        rm -rf ${chroot_dir}/tmp/kmod
+        # ③ depmod 兜底（deb 自带元数据，正常无需重建）
+        chroot ${chroot_dir} /bin/bash -c "depmod -a ${KMOD_VER}" 2>/dev/null || true
 
         # ── 自证 1：modules 真的进来了 ──
         KMOD_DIR=${chroot_dir}/lib/modules/${KMOD_VER}
         if [[ ! -s ${KMOD_DIR}/modules.dep ]]; then
-                kmod_fatal "lib/modules/${KMOD_VER}/modules.dep 缺失或为空 —— deb 安装失败"
+                kmod_fatal "lib/modules/${KMOD_VER}/modules.dep 缺失或为空 —— deb 解包失败"
         fi
         KO_N="$(find ${KMOD_DIR} -name '*.ko*' -type f 2>/dev/null | wc -l)"
         if [[ "${KO_N}" -eq 0 ]]; then
@@ -664,8 +664,10 @@ else
                 echo "[kmod] 固化 ko 数: ${KO_N}  modules.dep: $(stat -c %s ${KMOD_DIR}/modules.dep) B"
         fi
 
-        # ── 自证 2：deb 内核与 boot.img 内核必须是同一次编译（防 #11/#12 事故复发）──
-        # 编译串形如 "#12 SMP Sat Jul 25 01:27:03 UTC 2026"，两份 Image 各提取一条比对。
+        # ── 提示：deb 内核与 boot.img 内核的编译号对照（信息性，不阻断）──
+        # 编译串形如 "#12 SMP Sat Jul 25 01:27:03 UTC 2026"。两者非同一次构建时，
+        # 只要 release 串一致，模块 vermagic 相同、可正常加载（SDK 分步打包常态）；
+        # 若跨了内核版本/配置，modprobe 会失败 —— 此时让两者同源。
         KMOD_BANNER_RE='#[0-9]+ SMP [A-Za-z]{3} [A-Za-z]{3} +[0-9]+ [0-9:]{8} UTC [0-9]{4}'
         DEB_BANNER=""
         if [ -f ${overlay_dir}/usr/local/linux-image.deb ]; then
@@ -679,9 +681,9 @@ else
                         | grep -a -oE "${KMOD_BANNER_RE}" | head -1 || true)"
         fi
         if [[ -z "${BOOT_BANNER}" ]]; then
-                echo "[kmod][WARN] firmware/boot.img 不存在/非 ext4/取不到编译串 —— 跳过编译号一致性校验"
+                kmod_warn "firmware/boot.img 不存在/非 ext2·ext4/取不到编译串 —— 跳过编译号对照"
         elif [[ "${DEB_BANNER}" != "${BOOT_BANNER}" ]]; then
-                kmod_fatal "deb 内核(${DEB_BANNER:-取不到}) 与 boot.img 内核(${BOOT_BANNER}) 不是同一次编译 —— 烧录后 /boot 会被降级（#11/#12 事故）。同步更新 boot.img 或重新打包 deb 后再构建"
+                kmod_warn "deb 内核(${DEB_BANNER:-取不到}) 与 boot.img 内核(${BOOT_BANNER}) 非同一次编译。release 串一致时可正常加载；若 modprobe 报 vermagic/版本不符，请让 deb 与 boot.img 同源（SDK 里重打 deb 后同步更新 boot.img）"
         else
                 echo "[kmod] 编译号一致: ${BOOT_BANNER}"
         fi

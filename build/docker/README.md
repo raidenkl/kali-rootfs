@@ -299,13 +299,14 @@ fi
    注意该阶段指纹不覆盖脚本正文，改后需清标记。
 6. **内核 modules 固化（kmod 阶段，独立指纹）**：不再首启装 `linux-image.deb`
    （kernel-install.service 已退役——首启安装曾把 /boot 的 #12 内核降级成 deb 里的
-   #11，第二次开机卡死）。改为构建期在 chroot 里安装 deb 后清掉 `/boot/*`
-   （参考 LubanCat SDK 通道 A），只把 `/lib/modules/<ver>/`（~300 个 ko）留在
-   rootfs 中；deb 自带的 boot/ 整段丢弃。阶段末尾分档自证：modules.dep 缺失 /
-   ko 为 0 → FATAL；**deb 与 `build/firmware/boot.img` 的内核编译串不一致 →
-   FATAL**（形如 `#12 SMP Sat Jul 25 01:27:03 UTC 2026`，防再犯 #11/#12 事故）；
-   boot.img 缺失/取不到编译串 → WARN。指纹只含 deb 的大小/时间，改脚本正文后
-   需 `rm -f build/.build-state/stages/kmod.*`。
+   #11，第二次开机卡死）。改为构建期 `dpkg-deb -x` **只解出 `lib/modules/<ver>/`**
+   （~300 个 ko）固化进 rootfs，deb 自带的 Image/dtb/uEnv 直接忽略，
+   `/boot` 从头到尾不被触碰（boot.img 是唯一来源）。阶段末尾分档自证：
+   modules.dep 缺失 / ko 为 0 → FATAL；deb 与 `build/firmware/boot.img` 的内核
+   编译串不一致 → **WARN**（同一棵树连续构建 vermagic 相同、可正常加载；
+   跨内核版本/配置时才会真失败，届时让两者同源）；boot.img 缺失/取不到编译串 →
+   WARN。指纹只含 deb 的大小/时间，改脚本正文后需
+   `rm -f build/.build-state/stages/kmod.*`。
 
 **改动前**（判断恒为假 —— 第 294 行 tar 被注释、第 295 行 `SERVER_ONLY=Y` 时提前 `exit 0`，两个 tar.xz 永远不会生成）：
 

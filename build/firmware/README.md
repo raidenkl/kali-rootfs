@@ -32,11 +32,12 @@ cp rockdev/{MiniLoaderAll.bin,uboot.img,boot.img} ~/kali-rootfs/build/firmware/
 **不含任何 .ko**——模块（`/lib/modules/<ver>/`，~300 个 ko）在 rootfs.img 里。
 
 modules 的来源是 `overlay/usr/local/linux-image.deb`：构建期 `build-rootfs.sh` 的
-**kmod 阶段**会把它在 chroot 里安装后清掉 /boot（参考 LubanCat SDK 通道 A），
-只把 `lib/modules` 留在 rootfs 中。
+**kmod 阶段**用 `dpkg-deb -x` 只解出其中的 `lib/modules` 固化进 rootfs，
+deb 自带的 Image/dtb/uEnv **直接忽略**，`/boot` 从头到尾不被触碰。
 
-因此：**重新编译内核时，boot.img 和 linux-image.deb 必须一起更新**（同一份构建产物）。
-否则烧录后内核与 modules 不匹配（vermagic 不同 → modprobe 全挂）。构建期的 kmod
-阶段会提取两者的编译串（形如 `#12 SMP Sat Jul 25 01:27:03 UTC 2026`）做一致性校验，
-不一致直接 FATAL 拒绝出镜像——2026-09-24 曾因 deb(#11) 旧于 boot.img(#12) 且首启
-安装覆盖 /boot，导致第二次开机卡死在 lightdm 之前。
+构建期会把 deb 内 Image 与 boot.img 内 Image 的编译串（形如
+`#12 SMP Sat Jul 25 01:27:03 UTC 2026`）做对照：**不一致只给 WARN 不阻断**——
+同一棵内核树连续构建时模块 vermagic 相同、可正常加载（SDK 分步打包的常态）；
+但若两者跨了内核版本/配置，modprobe 会失败，届时请让 deb 与 boot.img 同源
+（SDK 里重打 deb 后同步更新 boot.img）。2026-09-24 曾因首启安装 deb 覆盖
+/boot（#12 被降级成 #11）导致第二次开机卡死，现已结构性杜绝。
