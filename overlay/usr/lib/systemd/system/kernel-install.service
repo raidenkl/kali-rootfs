@@ -1,3 +1,10 @@
+# ⚠ 已退役（仅存档，不再拷入镜像）：
+#   modules 已改为构建期从 overlay/usr/local/linux-image.deb 固化进 rootfs
+#   （见 build-rootfs.sh 的 kmod 阶段，参考 LubanCat SDK 通道 A）。
+#   本单元首启装 deb 会用 deb 内的 Image/dtb 覆盖 /boot —— 曾把 /boot 的
+#   #12 内核降级成 deb 里的 #11，导致第二次开机卡死（详见 2026-09-24 排障记录）。
+#   若要恢复首启安装：把本文件重新拷入镜像并 systemctl enable，同时务必先
+#   确认 deb 与 boot.img 的内核是同一次编译（构建脚本有 kmod 一致性校验可抄）。
 [Unit]
 Description=Install linux-image deb on first boot
 ConditionPathExists=!/boot/.linux-image-installed
