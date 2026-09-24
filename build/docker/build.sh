@@ -11,7 +11,15 @@
 #      REBUILD=0 bash build/docker/build.sh          # 不重建镜像，直接跑
 #      FORCE_REBUILD=1 bash build/docker/build.sh    # 忽略 rootfs.img 强制全量重建
 #      BOARD=lubancat-5 bash build/docker/build.sh   # 换板卡
+#      GPU_STACK=both bash build/docker/build.sh     # 预装 GPU 驱动栈（见下）
 #      SKIP_KERNEL_CHECK=1 bash build/docker/build.sh  # 跳过宿主内核预检（不推荐）
+#
+#  GPU_STACK（默认 none，也可写进 config/gpu-stack.conf 免得每次带）：
+#      none      不装，Kali 官方 Mesa（GL 走 llvmpipe 软渲染）
+#      panfork   装 panfork mesa → X11 桌面 GL / glamor 硬件加速
+#      libmali   装 Rockchip 闭源 libmali → GLES/EGL/Vulkan/OpenCL/无 X 的 GBM
+#      both      两者都装（推荐）：桌面走 panfork，计算/无 X 场景按需走 libmali
+#      切开关后建议 INCREMENTAL=1 增量跑，只会重跑 GPU 阶段。
 #
 #  收紧权限（不用 --privileged，适合共享机器）：
 #      EXTRA_RUN_ARGS='--cap-add SYS_ADMIN --cap-add SYS_CHROOT --cap-add MKNOD \
@@ -41,6 +49,12 @@ SKIP_KERNEL_CHECK="${SKIP_KERNEL_CHECK:-0}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
+
+# GPU 驱动栈宏：none | panfork | libmali | both（详见 config/gpu-stack.conf）
+# 优先级：环境变量 > config/gpu-stack.conf > none
+# （conf 里写的是 "${GPU_STACK:-none}"，所以环境变量天然覆盖它）
+[ -f config/gpu-stack.conf ] && . config/gpu-stack.conf
+GPU_STACK="${GPU_STACK:-none}"
 
 # ------------------------------- 前置校验 -----------------------------------
 command -v docker >/dev/null 2>&1 || { echo "ERROR: 未找到 docker" >&2; exit 1; }
@@ -149,6 +163,7 @@ echo " Kali rootfs 薄容器构建"
 echo "   镜像     : ${IMAGE}"
 echo "   平台     : ${PLATFORM}（宿主 $(uname -m)，可覆盖 PLATFORM）"
 echo "   板卡     : ${BOARD}"
+echo "   GPU 栈   : ${GPU_STACK}（none|panfork|libmali|both，可覆盖 GPU_STACK）"
 echo "   重建镜像 : ${REBUILD}"
 echo "   强制重建 : ${FORCE_REBUILD}"
 echo "   仓库     : ${REPO_ROOT}"
@@ -191,6 +206,7 @@ docker run --rm \
     -e BOARD="${BOARD}" \
     -e FORCE_REBUILD="${FORCE_REBUILD}" \
     -e SKIP_KERNEL_CHECK="${SKIP_KERNEL_CHECK}" \
+    -e GPU_STACK="${GPU_STACK}" \
     "${IMAGE}"
 
 # ------------------------------- 3. 汇报产物 ---------------------------------

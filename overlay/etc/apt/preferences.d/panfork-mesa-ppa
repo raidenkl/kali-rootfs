@@ -1,3 +1,20 @@
-Package: *
+# panfork-mesa PPA 的定向优先级
+#
+# 为什么需要：PPA 里的 mesa 版本带 epoch（1:23.0.5-0ubuntu1~panfork~...），在 apt
+# 眼里比 Kali 的 26.1.6 更"新"，但一旦有别的源提供同名的更新版本、或求解器改变
+# 选择，就可能被换掉。pin 1001（>1000 允许降级）确保这几个包始终取自 panfork PPA。
+#
+# 为什么是【窄范围】而不是 Package: *：
+#   该 PPA 里除了这几个包，还有 mesa-vulkan-drivers / mesa-va-drivers /
+#   mesa-vdpau-drivers / libosmesa6 / libgles2-mesa / libgl1-mesa-glx /
+#   libwayland-egl1-mesa / mesa-opencl-icd / libgl4es 等。
+#   用 Package: * 会让整个 PPA 对它们都拥有 1001 优先级 —— 相比"只降级真正服务
+#   桌面 GL 的那几个包"，那是无谓的、且会牵连 Vulkan/VA-API 的连锁降级。
+#   实测中 mesa-vulkan-drivers 仍可能因依赖求解被连带装上 panfork 版本，
+#   那是 apt 的依赖决策，不再受本 pin 影响（构建脚本会把实际变更的包全部 hold）。
+#
+# 与 config/gpu-stack.conf 的关系：只有 GPU_STACK=panfork|both 时才会注册该 PPA 源；
+# 源不存在时本 pin 不匹配任何候选，等于不存在，故可随镜像常驻。
+Package: libgl1-mesa-dri libglx-mesa0 libegl-mesa0 libglapi-mesa libgbm1
 Pin: release o=LP-PPA-liujianfeng1994-panfork-mesa
 Pin-Priority: 1001

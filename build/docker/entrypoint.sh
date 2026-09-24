@@ -25,6 +25,16 @@ BOARD="${BOARD:-lubancat-4}"
 FORCE_REBUILD="${FORCE_REBUILD:-0}"
 SKIP_KERNEL_CHECK="${SKIP_KERNEL_CHECK:-0}"
 
+# GPU 用户态驱动栈宏：none | panfork | libmali | both
+# 优先级：环境变量（build.sh 已用 -e 传进来）> config/gpu-stack.conf > none
+# 注意必须 export：build-rootfs.sh 是子进程，非导出变量它读不到。
+# 手动 docker run 时没走 build.sh，这里补读一次 conf，行为与一键脚本一致。
+if [ -f "${REPO}/config/gpu-stack.conf" ]; then
+    . "${REPO}/config/gpu-stack.conf"
+fi
+GPU_STACK="${GPU_STACK:-none}"
+export GPU_STACK
+
 log()  { printf '\n\033[1m>>> %s\033[0m\n' "$*"; }
 warn() { printf '\033[33mWARN: %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -73,6 +83,12 @@ log "[自检] 运行环境"
 echo "    仓库      : $REPO"
 echo "    板卡      : $BOARD"
 echo "    内核      : $(uname -r) / $(uname -m)"
+echo "    GPU 驱动栈: $GPU_STACK（none|panfork|libmali|both，来源: 环境变量或 config/gpu-stack.conf）"
+if [ "$GPU_STACK" = "libmali" ] || [ "$GPU_STACK" = "both" ]; then
+    if ! ls "$REPO"/packages/gpu/*.deb >/dev/null 2>&1; then
+        warn "GPU_STACK=$GPU_STACK 需要 packages/gpu/*.deb，但该目录是空的 —— libmali 会被跳过（见 packages/gpu/README.md）"
+    fi
+fi
 
 # --- 宿主内核版本预检 ----------------------------------------------------------
 #  容器与宿主共享内核，此处 uname -r 读到的就是宿主内核，判定可靠，故做成硬报错。
