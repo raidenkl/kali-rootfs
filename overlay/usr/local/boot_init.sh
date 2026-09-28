@@ -1,4 +1,6 @@
-#!/bin/bash -e
+#!/bin/bash -eE
+# -E：让 ERR trap 在函数/子 shell 里也生效，保证任何一步失败都能在
+# 串口控制台上看到失败行号（否则首启失败完全静默，看起来像卡死）。
 
 ### BEGIN INIT INFO
 # Provides:          LubanCat
@@ -11,6 +13,8 @@
 ### END INIT INFO
 
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+trap 'echo "[boot_init] FAILED at line ${LINENO}" >/dev/console 2>&1 || true' ERR
 
 board_info() {
 	if [[ "$2" == "rk3566" ||  "$2" == "rk3568" ]]; then
@@ -240,7 +244,8 @@ board_info ${BOARD_ID} ${SOC_type}
 # done
 sleep 0.2
 
-
+echo "[boot_init] board=$BOARD_NAME dtb=$BOARD_DTB uEnv=$BOARD_uEnv"
+echo "[boot_init] checking first-boot state ..."
 
 if [ ! -e "/boot/boot_init" ] ; then
 	if [ ! -e "/dev/disk/by-partlabel/userdata" ] ; then
@@ -254,8 +259,10 @@ if [ ! -e "/boot/boot_init" ] ; then
 				esac
 			done
 
+			echo "[boot_init] mount $Boot_Part -> /boot"
 			mount "$Boot_Part" /boot
 			echo "$Boot_Part  /boot  auto  defaults  0 2" >> /etc/fstab
+			echo "[boot_init] /boot fstab entry added"
 		fi
 
 		# service lightdm stop || echo "skip error"
@@ -263,12 +270,14 @@ if [ ! -e "/boot/boot_init" ] ; then
 		# apt install -fy --allow-downgrades /boot/kerneldeb/* || true
 		# apt-mark hold linux-headers-$(uname -r) linux-image-$(uname -r) || true
 
+		echo "[boot_init] select dtb/uEnv: $BOARD_DTB / $BOARD_uEnv"
 		ln -sf dtb/$BOARD_DTB /boot/rk-kernel.dtb
 		ln -sf $BOARD_uEnv /boot/uEnv/uEnv.txt
 
 		touch /boot/boot_init
 		rm -f /boot/kerneldeb/*
 		cp -f /boot/logo_kernel.bmp /boot/logo.bmp
+		echo "[boot_init] first-boot markers written (/boot/boot_init)"
 		#reboot
 	else
 		echo "PARTLABEL=oem  /oem  ext2  defaults  0 2" >> /etc/fstab
@@ -281,31 +290,48 @@ fi
 if [ ! -e "/boot/boot_dilatation_init" ] ;
    then
 
-   #转换MBR -> GPT分区表（失败不致命）
-   sgdisk -e /dev/mmcblk0 || true
+   #先判断是否需要扩容：文件系统已占满分区就整段跳过，
+   #避免在运行中的根盘上做不必要的分区表操作
+   PART_BYTES="$(blockdev --getsize64 /dev/mmcblk0p3 2>/dev/null || echo 0)"
+   FS_BYTES="$(dumpe2fs -h /dev/mmcblk0p3 2>/dev/null | awk -F: '/Block count/{c=$2} /Block size/{s=$2} END{print c*s}')"
+   echo "[boot_init] partition=${PART_BYTES:-0} bytes, filesystem=${FS_BYTES:-unknown} bytes"
 
-   #扩展根分区：优先 growpart（非交互、支持在线分区），退化为 parted -s。
-   #原来的 printf|parted ---pretend-input-tty 会被部分 parted 版本拒绝
-   #（"Error: Invalid number."），非零返回被 set -e 捕获后脚本直接退出，
-   #导致 resize2fs / touch / reboot 全部执行不到。
-   if command -v growpart >/dev/null 2>&1; then
-      growpart /dev/mmcblk0 3 || parted -s /dev/mmcblk0 resizepart 3 100% || true
-   else
-      parted -s /dev/mmcblk0 resizepart 3 100% || true
+   NEED_RESIZE=1
+   if [ -n "${FS_BYTES}" ] && [ -n "${PART_BYTES}" ] && [ "${FS_BYTES}" -ge "${PART_BYTES}" ] 2>/dev/null; then
+      NEED_RESIZE=0
+      echo "[boot_init] filesystem already fills the partition, skip resize"
    fi
 
-   #刷新内核分区表（在用的分区用 partx -u），否则 resize2fs 看不到新大小
-   partprobe /dev/mmcblk0 2>/dev/null || partx -u /dev/mmcblk0 2>/dev/null || true
+   if [ "${NEED_RESIZE}" = "1" ]; then
+      #转换MBR -> GPT分区表（失败不致命）
+      sgdisk -e /dev/mmcblk0 || true
 
-   #根据配置重新分配空间
-   resize2fs /dev/mmcblk0p3 || true
+      #扩展根分区：优先 growpart（非交互、支持在线分区），退化为 parted -s。
+      #原来的 printf|parted ---pretend-input-tty 会被部分 parted 版本拒绝
+      #（"Error: Invalid number."），非零返回被 set -e 捕获后脚本直接退出，
+      #导致 resize2fs / touch / reboot 全部执行不到。
+      if command -v growpart >/dev/null 2>&1; then
+         growpart /dev/mmcblk0 3 || parted -s /dev/mmcblk0 resizepart 3 100% || true
+      else
+         parted -s /dev/mmcblk0 resizepart 3 100% || true
+      fi
+
+      #刷新内核分区表：只作用于具体分区，避免全盘重读
+      partx -u /dev/mmcblk0p3 2>/dev/null || partprobe /dev/mmcblk0 2>/dev/null || true
+
+      #根据配置重新分配空间
+      resize2fs /dev/mmcblk0p3 || true
+   fi
 
 	#创建判断文件，第二次启动存在该文件不再执行此扩容
 	touch /boot/boot_dilatation_init
+	echo "[boot_init] resize stage done, marker written"
 
 	# 等待首启内核 deb 安装完成，再重启（避免重启打断 dpkg 造成半安装）
 	if systemctl is-enabled --quiet kernel-install.service 2>/dev/null; then
+		echo "[boot_init] waiting for kernel-install.service (dpkg linux-image.deb) ..."
 		systemctl start kernel-install.service || true
+		echo "[boot_init] kernel-install finished"
 	fi
 
 	# 不能直接用 `reboot`：脚本由 systemd 服务(或 SysV 兼容单元)承载时，
@@ -314,6 +340,7 @@ if [ ! -e "/boot/boot_dilatation_init" ] ;
 	# （首次开机不自动重启的根因）。--no-block 立即返回，重启交给
 	# systemd 异步执行。
 	sync
+	echo "[boot_init] all done, rebooting to apply new dtb/partition table ..."
 	if [ -d /run/systemd/system ]; then
 		systemctl --no-block reboot
 	else

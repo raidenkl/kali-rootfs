@@ -1,9 +1,6 @@
-## 0.说明
-一个可以构建kali-rootfs的脚本，适用于rk系列的芯片，要求主机是kali linux系统。
-`/overlay/usr/local/linux-image.deb`替换成实际的内核deb包，仓库里的是6.1.99的内核，对应的内核地址：https://github.com/LubanCat/kernel
-
-构建产物是 rootfs 分区镜像 `build/rootfs.img`，可以直接 `dd` 到板卡根分区。
-
+## 0.构建说明
+这是一个可以构建kali-rootfs的仓库，适用于rk系列的芯片，要求主机是kali linux系统。
+编译内核时要编译出一个deb包，因为`/overlay/usr/local/linux-image.deb`需要替换成实际的内核deb包，仓库里的是6.1.99的内核，对应的内核地址：https://github.com/LubanCat/kernel
 构建方式有两种，任选其一：
 
 | 方式 | 需要的环境 | 说明 |
@@ -11,8 +8,11 @@
 | **裸机** | kali linux + 手工装 20 多个依赖 | 见第 1 节 |
 | **Docker**（推荐） | 任意装了 docker 的机器 | 见第 2 节 |
 
+### 关于gpu
+本仓库目前只适配了rk3588的gpu驱动，如果要给其他rk芯片的板卡使用，`GPU_STACK`需要选择`none`，具体可选参数可以查阅2.7章节。 
+
 ## 1.用法（裸机）
-### 安装依赖
+### 1.1 安装依赖
 ```
 sudo apt-get install -y build-essential gcc-aarch64-linux-gnu bison \
 qemu-user-static qemu-system-arm u-boot-tools binfmt-support \
@@ -20,9 +20,11 @@ debootstrap flex libssl-dev bc rsync kmod cpio xz-utils fakeroot parted \
 udev dosfstools uuid-runtime git-lfs device-tree-compiler python3 fdisk \
 python-is-python3 python2
 ```
-然后执行仓库里`scripts/build-rootfs.sh`这个脚本即可，然后用`build/mk-image.sh`脚本打包成img镜像，就是rootfs分区镜像。
+### 1.2 编译
+执行仓库里`scripts/build-rootfs.sh`这个脚本，然后用`build/mk-image.sh`脚本打包成img镜像，就是rootfs分区镜像。
 
-> 注意：上面这份依赖清单来自上游，其中 `python2` 在 kali-rolling 中**已被移除**，照抄会让 `apt-get install` 直接失败，需要时请删掉该项。
+### 1.3 打包镜像
+`build/firmware`文件夹里的md文档有说明，需要自行准备这三个文件；编译好rootfs分区镜像后执行`mk-updateimg.sh rk356x|rk3576|rk3588`，就可以打包成可以用rkdevtool烧录的镜像。
 
 ## 2.用Docker构建（推荐）
 
@@ -71,8 +73,7 @@ build/mk-image.sh         ->   build/rootfs.img     # 最终产物
 1. 环境自检（root / 仓库是否挂上 / qemu binfmt / 磁盘空间）
 2. 调用 `scripts/build-rootfs.sh` 生成 `build/rootfs/`
 3. 容器适配清理：卸载 rootfs 内的残留挂载点（残留会把宿主 `/dev` 灌进 img）、删除构建期专用的 `qemu-aarch64-static`
-4. 补调 `config_image_hook__<board>()`（`build-rootfs.sh` 自己不调用它，不补会丢声卡命名 / WiFi 蓝牙共存 / 音频初始化）
-5. 调用 `build/mk-image.sh` 打包出 `build/rootfs.img`
+4. 调用 `build/mk-image.sh` 打包出 `build/rootfs.img`
 
 ### 2.3 用法一：一键脚本（推荐）
 
@@ -96,7 +97,7 @@ docker build -t kali-rootfs-builder .
 不写 `--platform` 时默认按宿主架构构建，通常就是你要的。要显式指定也可以加：x86_64 宿主用 `--platform linux/amd64`，arm64 宿主用 `--platform linux/arm64`。
 镜像架构必须和宿主机一致，否则运行时会退化成模拟（见 2.5）。
 
-**第 2 步，运行容器**（这就是「使用」这个镜像的方式）
+**第 2 步，运行容器**
 
 ```bash
 docker run --rm -it --privileged \
@@ -222,7 +223,36 @@ SKIP_KERNEL_CHECK=1 bash build/docker/build.sh
 
 # 自定义镜像名
 IMAGE=my-builder bash build/docker/build.sh
+
+# 预装 GPU 驱动栈（可选；默认 none，也可以写进 config/gpu-stack.conf 免得每次带）
+GPU_STACK=both bash build/docker/build.sh       # panfork + libmali 都装
+GPU_STACK=panfork bash build/docker/build.sh    # 只装 panfork（X11 桌面 GL 加速）
+GPU_STACK=libmali bash build/docker/build.sh    # 只装 Rockchip 闭源 libmali
 ```
+
+`GPU_STACK` 取值与优先级（环境变量 > `config/gpu-stack.conf` > `none`）：
+
+| 值 | 装什么 | 得到什么 | 代价 |
+|---|---|---|---|
+| `none`（默认） | 不装，Kali 官方 Mesa 26 | 无。GL 走 `llvmpipe` 软渲染（glmark2 ≈ 40） | 无 |
+| `panfork` | panfork mesa（PPA，23.x） | **X11 桌面 GL / glamor 硬件加速**（glmark2 ≈ 1000~1600） | mesa 家族降级到 23.x 并 hold；需联网拉 PPA + 从 Ubuntu jammy ports 补一个 `libllvm14` |
+| `libmali` | Rockchip 闭源 libmali（`packages/gpu/*.deb`） | GLES 3.2 / EGL / Vulkan 1.3 / OpenCL 3.0 / 无 X 的 GBM 直出（`kmscube` 60fps） | 桌面仍是软渲染（libmali 无桌面 GL） |
+| `both`（推荐） | 两者 | 桌面走 panfork，计算/无 X 场景按需走 libmali | 同上两者之和 |
+
+切换开关后建议增量构建，只会重跑 GPU 阶段：
+
+```bash
+INCREMENTAL=1 GPU_STACK=both bash build/docker/build.sh
+```
+
+> 注意：`build-rootfs.sh` 的 firmware 阶段（拷贝 WiFi/BT 固件）**指纹只覆盖 `overlay-firmware/`
+> 的文件清单，不覆盖脚本正文**。所以如果你改了那一段的命令（或拉到了修过 `cp -r` 嵌套问题的版本），
+> 要先清掉该阶段标记让它重跑，否则增量构建会跳过、改动不生效：
+> `rm -f build/.build-state/stages/firmware.done build/.build-state/stages/firmware.fp`
+
+背景、两个必须避开的坑（libmali 的全局库注入会让 Xorg 崩溃、`mali-g610-firmware`
+的错版固件）、以及烧录后的验证方法，见
+[build/docker/README.md §7.7](build/docker/README.md) 与 [packages/gpu/README.md](packages/gpu/README.md)。
 
 ### 2.8 产物与验证
 
@@ -234,9 +264,6 @@ sudo debugfs -R "ls -l /dev" build/rootfs.img 2>/dev/null | head -20
 
 # 确认构建期专用的 qemu 已删除
 sudo debugfs -R "stat /usr/bin/qemu-aarch64-static" build/rootfs.img 2>&1 | grep -i 'not found'
-
-# 确认板卡 hook 生效
-sudo debugfs -R "stat /etc/udev/rules.d/90-naming-audios.rules" build/rootfs.img
 
 # 文件系统健康度
 e2fsck -fn build/rootfs.img

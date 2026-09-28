@@ -25,3 +25,19 @@ cp rockdev/{MiniLoaderAll.bin,uboot.img,boot.img} ~/kali-rootfs/build/firmware/
 
 > 同一套 rootfs.img 配不同芯片时，只需要换 firmware/ 里的三个文件 +
 > 打包时选对芯片参数（`mk-updateimg.sh rk356x|rk3576|rk3588`），rootfs 本身不用重建。
+
+## ⚠ boot.img 与内核 modules 必须同一次编译
+
+`boot.img` 是 /boot 分区镜像（ext2）：内含内核 `Image-<ver>`、`dtb/`、`uEnv/`、boot.scr，
+**不含任何 .ko**——模块（`/lib/modules/<ver>/`，~300 个 ko）在 rootfs.img 里。
+
+modules 的来源是 `overlay/usr/local/linux-image.deb`：构建期 `build-rootfs.sh` 的
+**kmod 阶段**用 `dpkg-deb -x` 只解出其中的 `lib/modules` 固化进 rootfs，
+deb 自带的 Image/dtb/uEnv **直接忽略**，`/boot` 从头到尾不被触碰。
+
+构建期会把 deb 内 Image 与 boot.img 内 Image 的编译串（形如
+`#12 SMP Sat Jul 25 01:27:03 UTC 2026`）做对照：**不一致只给 WARN 不阻断**——
+同一棵内核树连续构建时模块 vermagic 相同、可正常加载（SDK 分步打包的常态）；
+但若两者跨了内核版本/配置，modprobe 会失败，届时请让 deb 与 boot.img 同源
+（SDK 里重打 deb 后同步更新 boot.img）。2026-09-24 曾因首启安装 deb 覆盖
+/boot（#12 被降级成 #11）导致第二次开机卡死，现已结构性杜绝。

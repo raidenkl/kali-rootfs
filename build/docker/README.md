@@ -228,21 +228,7 @@ findmnt -Rrn -o TARGET "$ROOTFS" | grep -q . && die "拒绝打包以免污染 im
 
 `entrypoint.sh` 在打包前删掉它。
 
-### 4.3 补调 board hook
-
-`config/boards/<board>.conf` 里的 `config_image_hook__<board>()` 函数**只被 `scripts/config-image.sh` 调用**，`build-rootfs.sh` 和 `mk-image.sh` 都不碰它。
-
-不补调会丢**三个功能**：
-
-| 丢失的功能 | 影响 |
-|---|---|
-| `90-naming-audios.rules` | 声卡显示为 cardN 原始名，桌面默认声卡可能选错 |
-| `rtl8852be-reload.service` | **官方 RTL8852BE WiFi+BT 卡开蓝牙时 WiFi 掉线** |
-| `alsa-audio-config.service` | HDMI/ES8388 音频初始化缺失，可能无声 |
-
-`entrypoint.sh` 的做法：`source` 仓库自带的 board conf，然后调用函数 —— 即把 `config-image.sh` 里本来就有的那段调用搬过来，不修改任何脚本。
-
-### 4.4 `mk-image.sh` 的 `e2fsck` 返回码陷阱
+### 4.3 `mk-image.sh` 的 `e2fsck` 返回码陷阱
 
 `mk-image.sh` 第 1 行是 `#!/bin/bash -e`，而第 29 行执行 `sudo e2fsck -p -f`。
 
@@ -278,10 +264,35 @@ fi
 
 ## 五、`build-rootfs.sh` 的改动
 
-共两处（行号会随改动漂移，以内容为准）：
+共五处（行号会随改动漂移，以内容为准）：
 
 1. **断点续传短路**：`rootfs.img` 存在即整套跳过（原逻辑判断两个永不生成的
    `*.tar.xz`，恒为假）。
+2. **增量构建开关**：`INCREMENTAL=1 / FORCE_REBUILD=1 / APT_REFRESH=1`，详见 7.4。
+   另：apt 列表显式加入 `bc`（首启脚本与内核 deb postinst 都依赖）、
+   `cloud-guest-utils`（growpart）。
+3. **日志/时钟策略**：journal 易失 + journal-flush 超时兜底 + fake-hwclock 提前
+   恢复；删除 `rtc-hym8563.service`。详见 7.6。
+4. **GPU 用户态驱动栈（阶段 2.5，可选）**：`GPU_STACK` 宏控制是否预装
+   panfork / libmali，详见 7.7。该阶段排在 apt 阶段之后（依赖 `apt`、`gpg` 与
+   XFCE 已就位），带独立指纹，只受开关与 `packages/gpu/*.deb` 影响。
+   阶段末尾有**分档自证**：会导致桌面起不来/驱动不可用的项（panfork 没降级成功、
+   libmali 缺实体 blob、默认库路径被 `mali/` 接管）直接 `exit 1` 中止构建；
+   固件类惰性问题只 WARN。
+5. **firmware 阶段的两个隐患修复**：`cp -r` 改合并式（否则 `GPU_STACK=libmali|both`
+   时 WiFi 固件会被嵌成 `/usr/lib/firmware/firmware/...`）、`ln -sf /lib/firmware`
+   加 `-e` 守卫（usrmerge 下会造出自指软链）。详见 7.7 第 3 条 ——
+   注意该阶段指纹不覆盖脚本正文，改后需清标记。
+6. **内核 modules 固化（kmod 阶段，独立指纹）**：不再首启装 `linux-image.deb`
+   （kernel-install.service 已退役——首启安装曾把 /boot 的 #12 内核降级成 deb 里的
+   #11，第二次开机卡死）。改为构建期 `dpkg-deb -x` **只解出 `lib/modules/<ver>/`**
+   （~300 个 ko）固化进 rootfs，deb 自带的 Image/dtb/uEnv 直接忽略，
+   `/boot` 从头到尾不被触碰（boot.img 是唯一来源）。阶段末尾分档自证：
+   modules.dep 缺失 / ko 为 0 → FATAL；deb 与 `build/firmware/boot.img` 的内核
+   编译串不一致 → **WARN**（同一棵树连续构建 vermagic 相同、可正常加载；
+   跨内核版本/配置时才会真失败，届时让两者同源）；boot.img 缺失/取不到编译串 →
+   WARN。指纹只含 deb 的大小/时间，改脚本正文后需
+   `rm -f build/.build-state/stages/kmod.*`。
 
 **改动前**（判断恒为假 —— 第 294 行 tar 被注释、第 295 行 `SERVER_ONLY=Y` 时提前 `exit 0`，两个 tar.xz 永远不会生成）：
 
@@ -328,14 +339,10 @@ debugfs -R "ls -l /dev" build/rootfs.img 2>/dev/null | head -20
 # 3. ★ 确认 qemu 残留已删（验证 4.2）
 debugfs -R "stat /usr/bin/qemu-aarch64-static" build/rootfs.img 2>&1 | grep -i 'not found'
 
-# 4. ★ 确认 board hook 生效（验证 4.3）
-debugfs -R "stat /etc/udev/rules.d/90-naming-audios.rules" build/rootfs.img
-debugfs -R "ls /usr/lib/systemd/system" build/rootfs.img | grep rtl8852be
-
-# 5. 文件系统健康度
+# 4. 文件系统健康度
 e2fsck -fn build/rootfs.img
 
-# 6. 挂载检查
+# 5. 挂载检查
 sudo mkdir -p /mnt/r && sudo mount -o loop,ro build/rootfs.img /mnt/r
 ls /mnt/r && sudo umount /mnt/r
 ```
@@ -432,6 +439,176 @@ EXTRA_RUN_ARGS='-e INCREMENTAL=1' bash build/docker/build.sh
 
 ---
 
+### 7.6 首次开机流程与日志策略（重要）
+
+**两段式首启是设计行为**：烧录后的第一次开机不会出现登录提示。
+
+| 开机 | 发生什么 |
+|---|---|
+| boot #1 | `boot_init.service`（sysinit 阶段）：挂载 p2→/boot 并写入 fstab、建 rk-kernel.dtb/uEnv.txt 软链、扩容 p3（sgdisk/growpart/resize2fs，已改为"fs 已满分区则跳过"）、等 `kernel-install.service`（dpkg 安装内核 deb）→ `systemctl --no-block reboot` |
+| boot #2 | 一切就绪：multi-user → 登录界面（getty/lightdm） |
+
+**boot #2 曾卡死的根因**（2026-09 排查）：板卡**无 RTC 电池**，开机时钟被拨回
+systemd 内置 epoch（2026-07-24 02:31:52）；跨开机持久化 journal 的最后条目总是
+"未来时间"，journald 启动即 `realtime clock jumped backwards → rotating`，并卡死
+`systemd-journal-flush`（oneshot 默认无启动超时）⇒ `sysinit.target` 永不完成 ⇒
+无登录界面。断电重启后 journald 把损坏的 journal 改名重建、跳过 rotate，于是
+"第二次开机就好了"。
+
+**已落地的修复**：
+
+1. `etc/systemd/journald.conf.d/10-volatile.conf`：`Storage=volatile` —— 不存在跨开机
+   journal，对时钟回拨免疫。代价：重启后无 `journalctl -b -1`，诊断靠串口输出与
+   ramoops/pstore。
+2. `etc/systemd/system/systemd-journal-flush.service.d/override.conf`：
+   `TimeoutStartSec=30` —— 即使 journald 异常也最多卡 30s 就放行 sysinit。
+3. `etc/systemd/system/fake-hwclock.service.d/override.conf`：时钟恢复（eMMC 持久化）
+   提前到 journald 之前；`chrony.conf` 已有 `rtcsync`（RTC 会在有电时被校正，但
+   **无电池、断电后不可靠**，不能作为唯一防线）。
+4. `boot_init.service` / `kernel-install.service` 增加 `StandardOutput/Error=journal+console`；
+   `boot_init.sh` 每阶段向串口打 `[boot_init] …` 进度、失败时打印行号 ⇒ 首启全程可观测。
+5. `rtc-hym8563.service` 已删除：依赖的 `hwclock` 不在镜像里，且内核探测 RTC 时已自动
+   设置系统时钟，功能重复。`chrony.conf` 保留 `rtcsync`（有电场景维持 RTC 正确）。
+
+**如需临时恢复持久日志**：删除
+`overlay/etc/systemd/journald.conf.d/10-volatile.conf`（板上为
+`/etc/systemd/journald.conf.d/10-volatile.conf`）→
+`mkdir -p /var/log/journal && systemctl restart systemd-journald`。
+前提：已用 rtcsync/fake-hwclock 保证时钟单调，否则会复现 boot #2 的卡死。
+
+---
+
+### 7.7 GPU 用户态驱动栈（可选，GPU_STACK 宏）
+
+**为什么需要**：本板内核是 Arm **kbase** 闭源 DDK（`/dev/mali0`，`Kernel DDK version
+g25p0-00eac0`），而 Kali 自带的 Mesa 26 里 panfrost/panthor 只认主线 panthor 驱动
+—— 配不上 kbase。表现是**没有任何报错**、GL 静默回退 `llvmpipe`，全程 CPU 软渲染
+（`glxinfo -B` 显示 `Accelerated: no`，`glmark2-es2` 约 40 分）。所以"装不装 GPU
+驱动"直接在镜像层面决定，而不是留着到板上再折腾。
+
+**开关**：`GPU_STACK` = `none`（默认）/ `panfork` / `libmali` / `both`
+（环境变量 > `config/gpu-stack.conf` > `none`）。实现是 `build-rootfs.sh` 的
+「阶段 2.5 GPU 用户态驱动栈」，带独立指纹 —— 只改开关或换 `packages/gpu/*.deb` 时，
+增量构建只会重跑这一段。
+
+**版本搭配的口径（选 blob 时先看这条）**：内核 kbase DDK 与用户态 blob（mali-so）版本难以
+完全对上时，**DDK 可以高于 mali-so，不允许 mali-so 高于 DDK**（Rockchip 官方口径）。
+本板内核是 `g25p0`，所以任何 **≤ g25p0** 的用户态都可用（现在装的是 `g24p0`，实测 OpenCL /
+`kmscube` 正常；更早用过的 `g13p0` 也能跑）；但把 **比内核新**的 blob 放进来（例如 `g26p0`
+配 `g25p0` 内核）是官方明确不允许的组合，那才是"处处都配好了却起不来"的首选嫌疑。
+`scripts/libmali-verify.sh` 的 `status` / `--probe` 会用 `gen_cmp()` 给出方向判定。
+
+| 值 | 装什么 | 得到什么 | 代价 / 注意 |
+|---|---|---|---|
+| `none` | 不装 | 无（软渲染基线 `glmark2`≈40） | 无 |
+| `panfork` | panfork mesa 23.x（PPA） | **X11 桌面 GL / glamor 硬件加速**（`glmark2` 1000~1600） | mesa 家族降级并 hold；联网拉 PPA + 从 Ubuntu jammy ports 补 `libllvm14` |
+| `libmali` | Rockchip 官方闭源 blob（`packages/gpu/*.deb`） | GLES 3.2 / EGL / Vulkan 1.3 / OpenCL 3.0 / 无 X 的 GBM 直出（`kmscube` 60fps） | 桌面仍软渲染（libmali 无桌面 GL） |
+| `both` | 两者 | 桌面走 panfork；计算/无 X 场景按需走 libmali | 两者之和 |
+
+**两个必须避开的坑**（都实际踩过，有日志实证）：
+
+1. **libmali 的全局库注入会让 Xorg 直接崩。** 它的 deb 自带
+   `/etc/ld.so.conf.d/00-aarch64-mali.conf`（内容一行
+   `/usr/lib/aarch64-linux-gnu/mali`），把 mali 目录插到**全局**库搜索最前 →
+   **Xorg 自己也加载 libmali 的 `libEGL`/`libgbm`** → glamor 渲染字形需要
+   `GL_EXT_blend_func_extended`（libmali 的 GLES 不支持）→
+   `Failed to compile FS ... GLSL compile failure` → `(EE) Fatal server error` →
+   lightdm 反复重启（`Scheduled restart job, restart counter is at 12`）→ 每轮重启都
+   重新 modeset HDMI → `dwhdmi-rockchip fde80000.hdmi: use tmds mode` 刷屏 + 桌面黑屏。
+   **构建阶段会把它注释掉**，libmali 只按需用 `LD_LIBRARY_PATH` 启用（这也是上游推荐姿势）。
+2. **`mali-g610-firmware` 的错版固件 —— 必须 mask，不是卫生问题。**
+   panfork 的 mesa 硬 `Depends: mali-g610-firmware`，所以必须装；但那个包（拆开看过）只提供
+   `g15p0/g17p0/g18p0` 三份 CSF 固件，由 `set-mali-firmware.service` 按 `dmesg` 里的 DDK 版本挑选
+   —— 本内核是 **g25p0**，匹配不上，落到 `*` 分支把 **g15p0** 固件链到
+   `/lib/firmware/mali_csffw.bin`（板卡实测：`-> /lib/firmware/mali_csffw_g15p0/mali_csffw.bin`）。
+
+   它的脚本是**每次开机无条件**这样干：
+
+   ```bash
+   mali_ddk_version=$(dmesg | grep "mali fb000000.gpu: Kernel DDK version" | awk '{print $NF}')
+   case "$mali_ddk_version" in
+       g18p0-01eac0|g17p0-01eac0) ... ;;   # 都匹配不上
+       *) rm -f /lib/firmware/mali_csffw.bin          # ← 无条件删掉当前那份
+          ln -s /lib/firmware/mali_csffw_g15p0/mali_csffw.bin /lib/firmware/mali_csffw.bin ;;
+   esac
+   ```
+
+   也就是说**任何放在该路径的文件都会被它删掉换成 g15p0 软链** —— board 上 Rockchip libmali deb
+   装进去的真文件（278528 B，md5 `EF6E1831…`）就是这样被顶掉的（dpkg 还以为文件在）。
+   所以构建阶段会 `systemctl disable` + `systemctl mask set-mali-firmware.service`，
+   并且**只删"指向 `mali_csffw_g1*p0` 的软链"**（保护 libmali 分支那份真文件）。
+   板上手工收敛：`systemctl disable --now set-mali-firmware.service && systemctl mask set-mali-firmware.service && rm -f /lib/firmware/mali_csffw.bin`。
+
+   **为什么磁盘上那份固件其实不被读取**（这是判断"要不要紧张"的依据）：本内核把 CSF 固件
+   **编译进了 kbase 驱动**，证据是内核镜像本身：
+
+   ```
+   boot/Image-6.1.99-rk3588（43,624,960 B）内含字符串 mali_csffw（偏移 41,896,773），
+   上下文里还有注册名 g25p0-00eac0.mali_csffw.bin 与版本串 g25p0-00eac0 (UK version 1.31)
+   配置：CONFIG_MALI_CSF_INCLUDE_FW=y（Arm 自己的"把固件编进 kbase"开关）、CONFIG_MALI_BIFROST=y、
+         CONFIG_MALI_CSF_SUPPORT=y，而 CONFIG_EXTRA_FIRMWARE=""（空，走的不是通用固件机制）
+   ```
+
+   旁证：装 libmali 之前 `/lib/firmware/mali_csffw.bin`（含 `.xz`/`.zst`）**根本不存在**，
+   而 kbase 探测正常、GLES/OpenCL/kmscube 全部可用；dmesg 也从无 `Direct firmware load` 行。
+   → 结论：磁盘上放什么版本都不影响今天的运行，但**错版残留会让排查者误判**（我们就绕了一圈），
+   而且换个没开 `MALI_CSF_INCLUDE_FW` 的内核它就立刻变成真的地雷。
+
+3. **firmware 阶段的 `cp -r` 会因 libmali 的存在而把 WiFi 固件嵌错一层。**
+   GPU 阶段（阶段 2.5）跑在 firmware 阶段（阶段 5）**之前**，而装上 libmali deb 后
+   `/usr/lib/firmware` 一定已存在（它往那里放 `mali_csffw.bin`）。GNU `cp -r SRC DST/`
+   在 `DST/firmware` 已存在时会把整个源目录**再嵌一层** → `/usr/lib/firmware/firmware/aic8800/...`
+   → **新镜像掉 WiFi**。已改为合并式：
+
+   ```bash
+   mkdir -p ${chroot_dir}/usr/lib/firmware
+   cp -r ${firmware_dir}/usr/lib/firmware/. ${chroot_dir}/usr/lib/firmware/
+   ```
+
+   同时 `ln -sf /usr/lib/firmware /lib/firmware` 加了 `-e` 守卫 —— 系统是 usrmerge
+   （`/lib` 就是 `usr/lib`），该路径通常已存在，无条件 `ln -sf` 会在里面造出
+   `/usr/lib/firmware/firmware -> /usr/lib/firmware` 这种自指软链（板卡实测存在，无害但脏）。
+
+   ⚠️ **该阶段的指纹只覆盖 `overlay-firmware/` 的文件清单、不覆盖脚本正文**，所以改完必须手工让它重跑：
+
+   ```bash
+   rm -f build/.build-state/stages/firmware.done build/.build-state/stages/firmware.fp
+   ```
+
+4. **只允许放一份 libmali。** 两份（例如 PPA 的 `libmali-g610-x11` + Rockchip 的 g24p0 deb）
+   会让系统出现**两个 OpenCL 平台、两份 blob**，程序按平台序号选，可能选到不同版本。
+   `build-rootfs.sh` 会在构建期硬断言（>1 个提供 `libmali` 的 deb 直接 `exit 1`），
+   详见 [packages/gpu/README.md](../../packages/gpu/README.md)。
+
+**烧录后如何验证**（板卡上跑，仓库自带脚本）：
+
+```bash
+# 桌面 GL：期望 renderer = Mali-G610 (Panfrost)、Accelerated: yes
+sudo bash scripts/panfork-verify.sh --verify     # 驱动归属 / X 与桌面 GL / 压测 / OpenCL 共存
+
+# libmali：期望 GL_RENDERER = Mali-G610；桌面 GL 那栏恒为 llvmpipe 属预期（结构性限制）
+sudo bash libmali-verify.sh                      # 现状 + 通路归属 + 固件判定
+sudo bash libmali-verify.sh --nodisp             # OpenCL/Vulkan 枚举（不需要显示器）
+sudo bash libmali-verify.sh --route              # 哪个程序走哪套 / 怎么强制切换
+sudo bash scripts/check-gpu.sh                   # L1~L7 分层自检（L2.5 会判 CSF 固件）
+
+# 无 X 的 DRM 直出（最直观：HDMI 上会出现旋转立方体）
+sudo systemctl stop lightdm
+sudo env -u DISPLAY LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/mali kmscube
+sudo systemctl start lightdm
+```
+
+⚠️ 在 ssh/MobaXterm 里测 GL 时注意：`DISPLAY=localhost:10.0` 是**转发显示**，
+`xset` 能通但 GL/EGL **永远不可用**（转发通道做不了 ioctl）。本地 X 的正确凭据是
+`DISPLAY=:0 XAUTHORITY=/var/run/lightdm/root/:0`（lightdm 以 root 启动的 X）。
+上面的脚本会自动识别并切换。
+
+**性能参考值**（`glmark2-es2` 800×600 窗口）：`llvmpipe` ≈ 40；panfrost(panfork)
+1000~1600；闭源 libmali blob 2000~2400。**不要用 2000+ 去要求 panfork** ——
+panfrost 比闭源 blob 慢约一半是正常现象。
+
+---
+
 ## 八、与原裸机流程的对照
 
 | 项目 | 裸机流程 | 薄容器方案 |
@@ -440,7 +617,7 @@ EXTRA_RUN_ARGS='-e INCREMENTAL=1' bash build/docker/build.sh
 | 宿主要求 | kali linux + root | 任意 docker 宿主机 |
 | 可复现性 | 依赖宿主状态 | 镜像固定 |
 | 改脚本后 | 直接跑 | 直接跑（仓库挂载，零重建） |
-| `build-rootfs.sh` | 原样 | 仅改第 15-17 行 |
+| `build-rootfs.sh` | 原样 | 断点续传 / 增量阶段 / 日志时钟策略 / GPU 驱动栈（可选） |
 | `mk-image.sh` | 原样 | **零改动** |
-| board hook | 不执行（同样的问题） | 由入口补调 |
+| board hook | 执行（`config-image.sh`） | **不执行**（补调已移除；需要时把 `config/boards/*.conf` 里的 hook 内容搬进 `build-rootfs.sh`） |
 | 产物位置 | `build/` | `build/`（挂载，零拷贝） |
