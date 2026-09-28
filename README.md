@@ -1,9 +1,6 @@
-## 0.说明
-一个可以构建kali-rootfs的脚本，适用于rk系列的芯片，要求主机是kali linux系统。
-`/overlay/usr/local/linux-image.deb`替换成实际的内核deb包，仓库里的是6.1.99的内核，对应的内核地址：https://github.com/LubanCat/kernel
-
-构建产物是 rootfs 分区镜像 `build/rootfs.img`，可以直接 `dd` 到板卡根分区。
-
+## 0.构建说明
+这是一个可以构建kali-rootfs的仓库，适用于rk系列的芯片，要求主机是kali linux系统。
+编译内核时要编译出一个deb包，因为`/overlay/usr/local/linux-image.deb`需要替换成实际的内核deb包，仓库里的是6.1.99的内核，对应的内核地址：https://github.com/LubanCat/kernel
 构建方式有两种，任选其一：
 
 | 方式 | 需要的环境 | 说明 |
@@ -11,8 +8,11 @@
 | **裸机** | kali linux + 手工装 20 多个依赖 | 见第 1 节 |
 | **Docker**（推荐） | 任意装了 docker 的机器 | 见第 2 节 |
 
+### 关于gpu
+本仓库目前只适配了rk3588的gpu驱动，如果要给其他rk芯片的板卡使用，`GPU_STACK`需要选择`none`，具体可选参数可以查阅2.7章节。 
+
 ## 1.用法（裸机）
-### 安装依赖
+### 1.1 安装依赖
 ```
 sudo apt-get install -y build-essential gcc-aarch64-linux-gnu bison \
 qemu-user-static qemu-system-arm u-boot-tools binfmt-support \
@@ -20,9 +20,11 @@ debootstrap flex libssl-dev bc rsync kmod cpio xz-utils fakeroot parted \
 udev dosfstools uuid-runtime git-lfs device-tree-compiler python3 fdisk \
 python-is-python3 python2
 ```
-然后执行仓库里`scripts/build-rootfs.sh`这个脚本即可，然后用`build/mk-image.sh`脚本打包成img镜像，就是rootfs分区镜像。
+### 1.2 编译
+执行仓库里`scripts/build-rootfs.sh`这个脚本，然后用`build/mk-image.sh`脚本打包成img镜像，就是rootfs分区镜像。
 
-> 注意：上面这份依赖清单来自上游，其中 `python2` 在 kali-rolling 中**已被移除**，照抄会让 `apt-get install` 直接失败，需要时请删掉该项。
+### 1.3 打包镜像
+`build/firmware`文件夹里的md文档有说明，需要自行准备这三个文件；编译好rootfs分区镜像后执行`mk-updateimg.sh rk356x|rk3576|rk3588`，就可以打包成可以用rkdevtool烧录的镜像。
 
 ## 2.用Docker构建（推荐）
 
@@ -96,7 +98,7 @@ docker build -t kali-rootfs-builder .
 不写 `--platform` 时默认按宿主架构构建，通常就是你要的。要显式指定也可以加：x86_64 宿主用 `--platform linux/amd64`，arm64 宿主用 `--platform linux/arm64`。
 镜像架构必须和宿主机一致，否则运行时会退化成模拟（见 2.5）。
 
-**第 2 步，运行容器**（这就是「使用」这个镜像的方式）
+**第 2 步，运行容器**
 
 ```bash
 docker run --rm -it --privileged \
