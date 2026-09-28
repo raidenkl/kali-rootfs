@@ -228,21 +228,7 @@ findmnt -Rrn -o TARGET "$ROOTFS" | grep -q . && die "拒绝打包以免污染 im
 
 `entrypoint.sh` 在打包前删掉它。
 
-### 4.3 补调 board hook
-
-`config/boards/<board>.conf` 里的 `config_image_hook__<board>()` 函数**只被 `scripts/config-image.sh` 调用**，`build-rootfs.sh` 和 `mk-image.sh` 都不碰它。
-
-不补调会丢**三个功能**：
-
-| 丢失的功能 | 影响 |
-|---|---|
-| `90-naming-audios.rules` | 声卡显示为 cardN 原始名，桌面默认声卡可能选错 |
-| `rtl8852be-reload.service` | **官方 RTL8852BE WiFi+BT 卡开蓝牙时 WiFi 掉线** |
-| `alsa-audio-config.service` | HDMI/ES8388 音频初始化缺失，可能无声 |
-
-`entrypoint.sh` 的做法：`source` 仓库自带的 board conf，然后调用函数 —— 即把 `config-image.sh` 里本来就有的那段调用搬过来，不修改任何脚本。
-
-### 4.4 `mk-image.sh` 的 `e2fsck` 返回码陷阱
+### 4.3 `mk-image.sh` 的 `e2fsck` 返回码陷阱
 
 `mk-image.sh` 第 1 行是 `#!/bin/bash -e`，而第 29 行执行 `sudo e2fsck -p -f`。
 
@@ -353,14 +339,10 @@ debugfs -R "ls -l /dev" build/rootfs.img 2>/dev/null | head -20
 # 3. ★ 确认 qemu 残留已删（验证 4.2）
 debugfs -R "stat /usr/bin/qemu-aarch64-static" build/rootfs.img 2>&1 | grep -i 'not found'
 
-# 4. ★ 确认 board hook 生效（验证 4.3）
-debugfs -R "stat /etc/udev/rules.d/90-naming-audios.rules" build/rootfs.img
-debugfs -R "ls /usr/lib/systemd/system" build/rootfs.img | grep rtl8852be
-
-# 5. 文件系统健康度
+# 4. 文件系统健康度
 e2fsck -fn build/rootfs.img
 
-# 6. 挂载检查
+# 5. 挂载检查
 sudo mkdir -p /mnt/r && sudo mount -o loop,ro build/rootfs.img /mnt/r
 ls /mnt/r && sudo umount /mnt/r
 ```
@@ -637,5 +619,5 @@ panfrost 比闭源 blob 慢约一半是正常现象。
 | 改脚本后 | 直接跑 | 直接跑（仓库挂载，零重建） |
 | `build-rootfs.sh` | 原样 | 断点续传 / 增量阶段 / 日志时钟策略 / GPU 驱动栈（可选） |
 | `mk-image.sh` | 原样 | **零改动** |
-| board hook | 不执行（同样的问题） | 由入口补调 |
+| board hook | 执行（`config-image.sh`） | **不执行**（补调已移除；需要时把 `config/boards/*.conf` 里的 hook 内容搬进 `build-rootfs.sh`） |
 | 产物位置 | `build/` | `build/`（挂载，零拷贝） |

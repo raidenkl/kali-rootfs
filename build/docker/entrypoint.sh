@@ -311,54 +311,12 @@ if [ -f "$QEMU_IN_ROOTFS" ]; then
     echo "    已删除    : usr/bin/qemu-aarch64-static（构建期专用）"
 fi
 
-# --- 3.3 补调 board hook -------------------------------------------------------
-#  config/boards/<board>.conf 里的 config_image_hook__<board>() 函数只被
-#  scripts/config-image.sh 调用；build-rootfs.sh 和 mk-image.sh 都不碰它。
-#
-#  不补调会丢三个功能：
-#    * 90-naming-audios.rules      声卡命名（HDMI0/DP0/ES8388）
-#    * rtl8852be-reload.service    修 RTL8852BE 开蓝牙时 WiFi 掉线
-#    * alsa-audio-config.service   HDMI/ES8388 音频初始化
-#
-#  这里的做法是把 config-image.sh 里本来就有的那段调用搬过来 ——
-#  source 仓库自带的函数定义，不修改任何脚本。
-BOARD_CONF="$REPO/config/boards/${BOARD}.conf"
-if [ -f "$BOARD_CONF" ]; then
-    # board conf 内部用 ${chroot_dir} / ${overlay_dir}，必须提供这两个变量
-    export chroot_dir="$ROOTFS"
-    export overlay_dir="$REPO/overlay"
-
-    # shellcheck disable=SC1090
-    source "$BOARD_CONF"
-
-    if declare -F "config_image_hook__${BOARD}" >/dev/null 2>&1; then
-        echo "    执行 hook : config_image_hook__${BOARD}"
-
-        # hook 内部会 `chroot ... systemctl enable`，需要伪文件系统可用
-        mkdir -p "$ROOTFS/proc" "$ROOTFS/sys" "$ROOTFS/dev" "$ROOTFS/dev/pts"
-        mount -t proc  /proc "$ROOTFS/proc" 2>/dev/null || warn "无法挂载 $ROOTFS/proc"
-        mount -t sysfs /sys  "$ROOTFS/sys"  2>/dev/null || warn "无法挂载 $ROOTFS/sys"
-        mount -o bind  /dev  "$ROOTFS/dev"  2>/dev/null || warn "无法 bind $ROOTFS/dev"
-
-        rc=0
-        "config_image_hook__${BOARD}" || rc=$?
-
-        umount -lf "$ROOTFS/dev" "$ROOTFS/sys" "$ROOTFS/proc" 2>/dev/null || true
-
-        [ "$rc" -eq 0 ] || warn "board hook 返回 $rc，请检查日志"
-    else
-        echo "    board conf 中未定义 config_image_hook__${BOARD}()，跳过"
-    fi
-else
-    echo "    未找到 $BOARD_CONF，跳过 board hook"
-fi
-
-# 3.4 hook 之后可能又产生挂载，再清一次
+# 3.3 再清一次挂载（防御性兜底：3.1 之后若仍产生挂载，这里补一刀）
 for d in dev/pts dev proc sys run; do
     umount_one "$ROOTFS/$d"
 done
 
-# --- 3.5 rootfs 体积快照（便于在日志里直接看到效果）----------------------------
+# --- 3.4 rootfs 体积快照（便于在日志里直接看到效果）----------------------------
 ROOTFS_SIZE=$(du -sh --apparent-size "$ROOTFS" 2>/dev/null | cut -f1 || echo "?")
 echo "    rootfs 大小: ${ROOTFS_SIZE}"
 

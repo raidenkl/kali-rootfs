@@ -177,9 +177,8 @@ RUN set -eux; \
 #    1) 检查 root 权限、仓库挂载、qemu binfmt 是否就绪
 #    2) 调用 scripts/build-rootfs.sh
 #    3) 清理 rootfs 下的挂载残留（防止宿主 /dev 被灌进 img）
-#    4) 补调 config_image_hook__<board>（build-rootfs.sh 本身不调用它）
-#    5) 删除构建期专用的 qemu-aarch64-static
-#    6) 调用 build/mk-image.sh 并处理 e2fsck 返回码陷阱
+#    4) 删除构建期专用的 qemu-aarch64-static
+#    5) 调用 build/mk-image.sh 并处理 e2fsck 返回码陷阱
 # -----------------------------------------------------------------------------
 COPY build/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

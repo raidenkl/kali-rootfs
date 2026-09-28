@@ -73,8 +73,7 @@ build/mk-image.sh         ->   build/rootfs.img     # 最终产物
 1. 环境自检（root / 仓库是否挂上 / qemu binfmt / 磁盘空间）
 2. 调用 `scripts/build-rootfs.sh` 生成 `build/rootfs/`
 3. 容器适配清理：卸载 rootfs 内的残留挂载点（残留会把宿主 `/dev` 灌进 img）、删除构建期专用的 `qemu-aarch64-static`
-4. 补调 `config_image_hook__<board>()`（`build-rootfs.sh` 自己不调用它，不补会丢声卡命名 / WiFi 蓝牙共存 / 音频初始化）
-5. 调用 `build/mk-image.sh` 打包出 `build/rootfs.img`
+4. 调用 `build/mk-image.sh` 打包出 `build/rootfs.img`
 
 ### 2.3 用法一：一键脚本（推荐）
 
@@ -265,9 +264,6 @@ sudo debugfs -R "ls -l /dev" build/rootfs.img 2>/dev/null | head -20
 
 # 确认构建期专用的 qemu 已删除
 sudo debugfs -R "stat /usr/bin/qemu-aarch64-static" build/rootfs.img 2>&1 | grep -i 'not found'
-
-# 确认板卡 hook 生效
-sudo debugfs -R "stat /etc/udev/rules.d/90-naming-audios.rules" build/rootfs.img
 
 # 文件系统健康度
 e2fsck -fn build/rootfs.img

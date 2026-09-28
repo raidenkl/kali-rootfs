@@ -354,24 +354,7 @@ jobs:
             fi
           fi
 
-          # --- 7.5 ★ 检查 board hook 生效 ---
-          #  config_image_hook__<board>() 只被 config-image.sh 调用，
-          #  entrypoint.sh 负责补调。不生效说明补调逻辑有问题。
-          if [ -f build/rootfs.img ]; then
-            echo ""
-            if debugfs -R "stat /etc/udev/rules.d/90-naming-audios.rules" build/rootfs.img 2>&1 | grep -qi "not found\|File not found"; then
-              echo "[WARN] 90-naming-audios.rules 不存在，board hook 可能未生效"
-            else
-              echo "[OK] board hook 生效（声卡命名规则在位）"
-            fi
-            if debugfs -R "stat /usr/lib/systemd/system/rtl8852be-reload.service" build/rootfs.img 2>&1 | grep -qi "not found\|File not found"; then
-              echo "[WARN] rtl8852be-reload.service 不存在，board hook 可能未生效"
-            else
-              echo "[OK] rtl8852be-reload.service 在位"
-            fi
-          fi
-
-          # --- 7.6 文件系统健康度 ---
+          # --- 7.5 文件系统健康度 ---
           if [ -f build/rootfs.img ]; then
             echo ""
             if e2fsck -fn build/rootfs.img >/dev/null 2>&1; then
@@ -386,7 +369,7 @@ jobs:
               "Block count|Block size|Free blocks|Filesystem features" || true
           fi
 
-          # --- 7.7 rootfs 关键内容抽查 ---
+          # --- 7.6 rootfs 关键内容抽查 ---
           if [ -d build/rootfs ]; then
             echo ""
             echo "=== rootfs 关键路径抽查 ==="
