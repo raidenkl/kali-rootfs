@@ -14,7 +14,7 @@ build/mk-updateimg.sh    →  build/update.img   整包（loader + uboot + boot 
 
 | 需要准备 | 放到哪里 | 说明 |
 |---|---|---|
-| **内核 deb** | `overlay/usr/local/linux-image.deb` | 仓库自带一份 `6.1.99-rk3588`。**换内核或换 SoC 必须替换**，否则镜像里 `/lib/modules` 是空的，`modprobe` 全挂 |
+| **内核 deb** | `overlay/usr/local/linux-image.deb` | 仓库**不内置**（`.gitignore` 已忽略），需你自行放入目标板内核的 `linux-image-*.deb`。**换内核或换 SoC 必须替换**，否则镜像里 `/lib/modules` 是空的，`modprobe` 全挂 |
 | **Bootloader 三件套** | `build/firmware/` | `MiniLoaderAll.bin`、`uboot.img`、`boot.img`。仓库**不含**（体积大且与板卡绑定），从 SDK 编译后拷进来 |
 
 两者的获取方式、以及"boot.img 与内核 deb 必须同一次编译"这条硬约束，见

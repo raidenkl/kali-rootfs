@@ -40,6 +40,9 @@ cp rockdev/{MiniLoaderAll.bin,uboot.img,boot.img} ~/kali-rootfs/build/firmware/
 
 ## 内核 deb（`overlay/usr/local/linux-image.deb`）从哪来
 
+> 这个文件**不入库**（`.gitignore` 里有 `overlay/usr/local/linux-image.deb`）：它体积大、且与 SoC 和内核版本强绑定。
+> 克隆仓库后需要你自己放进去，文件名固定为 `linux-image.deb`。
+
 内核源码：<https://github.com/LubanCat/kernel>。**它必须与 `boot.img` 出自同一棵树、同一次编译。**
 
 两种产出方式：

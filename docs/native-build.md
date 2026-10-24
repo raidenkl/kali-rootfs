@@ -135,6 +135,9 @@ rm -f build/.build-state/stages/kmod.*        # 让 modules 固化阶段重跑
 INCREMENTAL=1 sudo bash scripts/build-rootfs.sh
 ```
 
+> `overlay/usr/local/linux-image.deb` **不入库**（`.gitignore` 忽略），是纯本地输入：
+> 克隆仓库后需要自己放，换内核/换 SoC 时替换它即可。
+
 内核版本目录名（`KMOD_VER`）由脚本从 deb 的 `lib/modules/<ver>/` **自动探测**，不用手改。
 但 **`build/firmware/boot.img` 必须换成同一次编译的产物**，否则会出现"内核与模块/DTB 不匹配"，
 详见 [../build/firmware/README.md](../build/firmware/README.md)。

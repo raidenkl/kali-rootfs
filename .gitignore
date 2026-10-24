@@ -15,6 +15,9 @@ build/firmware/*
 build/update-img/
 images/
 
+# 内核 deb 由使用者自行放入（体积大、与 SoC/内核版本绑定，不入库）
+overlay/usr/local/linux-image.deb
+
 # 编辑器与临时文件
 .vscode/
 .idea/
