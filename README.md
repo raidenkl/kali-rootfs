@@ -144,9 +144,15 @@ SOC=rk3576 GPU_STACK=libmali bash build/docker/build.sh
 | GPU_STACK | 得到什么 |
 |---|---|
 | `none`（默认） | 无加速，GL 走 llvmpipe |
-| `panfork` | **X11 桌面 GL / glamor 硬件加速**（唯一能给桌面加速的路线） |
+| `panfork` | **X11 桌面 GL / glamor 硬件加速**（唯一能给桌面加速的路线）· **仅 rk3588** |
 | `libmali` | GLES / EGL / OpenCL / 无 X 的 GBM 直出；桌面仍软渲染 |
-| `both` | 桌面走 panfork，计算按需走 libmali |
+| `both` | 桌面走 panfork，计算按需走 libmali · **仅 rk3588** |
+
+> ⚠️ **RK3576（Mali-G52 / Bifrost）上 `GPU_STACK` 只能是 `none` 或 `libmali`。**
+> `panfork` 依赖的 Mesa kbase 后端在这颗 GPU 上会直接崩溃：`ioctl(KBASE_IOCTL_MEM_JIT_INIT)`
+> 返回 ENOMEM → 驱动 `double free` → Xorg `Caught signal 6 (Aborted)` → lightdm 起不来。
+> 所以 `panfork` 与 `both` 在 rk3576 上都不要用（`both` 含 panfork）。
+> 现象与排查见 [docs/troubleshooting.md](docs/troubleshooting.md)。
 
 取舍、验证方法与踩过的坑见 [packages/gpu/README.md](packages/gpu/README.md)。
 装完可在板上自检：
