@@ -33,7 +33,8 @@ if [ -f "${REPO}/config/gpu-stack.conf" ]; then
     . "${REPO}/config/gpu-stack.conf"
 fi
 GPU_STACK="${GPU_STACK:-none}"
-export GPU_STACK
+SOC="${SOC:-rk3588}"
+export GPU_STACK SOC
 
 log()  { printf '\n\033[1m>>> %s\033[0m\n' "$*"; }
 warn() { printf '\033[33mWARN: %s\033[0m\n' "$*" >&2; }
@@ -84,9 +85,10 @@ echo "    仓库      : $REPO"
 echo "    板卡      : $BOARD"
 echo "    内核      : $(uname -r) / $(uname -m)"
 echo "    GPU 驱动栈: $GPU_STACK（none|panfork|libmali|both，来源: 环境变量或 config/gpu-stack.conf）"
+echo "    目标 SoC  : $SOC"
 if [ "$GPU_STACK" = "libmali" ] || [ "$GPU_STACK" = "both" ]; then
-    if ! ls "$REPO"/packages/gpu/*.deb >/dev/null 2>&1; then
-        warn "GPU_STACK=$GPU_STACK 需要 packages/gpu/*.deb，但该目录是空的 —— libmali 会被跳过（见 packages/gpu/README.md）"
+    if ! ls "$REPO"/packages/gpu/"$SOC"/*.deb >/dev/null 2>&1; then
+        warn "GPU_STACK=$GPU_STACK 需要 packages/gpu/$SOC/*.deb，但该目录是空的 —— libmali 会被跳过（见 packages/gpu/README.md）"
     fi
 fi
 

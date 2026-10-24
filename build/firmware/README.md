@@ -26,6 +26,18 @@ cp rockdev/{MiniLoaderAll.bin,uboot.img,boot.img} ~/kali-rootfs/build/firmware/
 > 同一套 rootfs.img 配不同芯片时，只需要换 firmware/ 里的三个文件 +
 > 打包时选对芯片参数（`mk-updateimg.sh rk356x|rk3576|rk3588`），rootfs 本身不用重建。
 
+### 换 SoC（rk3576）时的额外注意
+
+| 项 | rk3588 | rk3576 |
+|---|---|---|
+| 三件套 | rk3588 的 `MiniLoaderAll.bin` / `uboot.img` / `boot.img` | **必须整套换成 rk3576 的**（loader 决定可烧录芯片，混用会烧不上/起不来） |
+| 内核 release | `6.1.99-rk3588` | `6.1.99-rk3576` |
+| GPU 节点 | `fb000000.gpu`（arch 10.8.6，Valhall/CSF） | `27800000.gpu`（arch 7.4.0，Bifrost/JM） |
+| 分区参数 | `config/pack/parameter-rk3588.txt` | `config/pack/parameter-rk3576.txt`（三份同构：mtdparts/uuid 一致） |
+
+`KMOD_VER` 不再写死：`build-rootfs.sh` 从 `linux-image.deb` 里的 `lib/modules/<ver>/` 自动探测
+（探测不到才回退 `6.1.99-<SOC>`），所以换内核只需换 deb；`mk-updateimg.sh` 的芯片参数也跟随 `SOC`。
+
 ## ⚠ boot.img 与内核 modules 必须同一次编译
 
 `boot.img` 是 /boot 分区镜像（ext2）：内含内核 `Image-<ver>`、`dtb/`、`uEnv/`、boot.scr，

@@ -275,7 +275,7 @@ fi
    恢复；删除 `rtc-hym8563.service`。详见 7.6。
 4. **GPU 用户态驱动栈（阶段 2.5，可选）**：`GPU_STACK` 宏控制是否预装
    panfork / libmali，详见 7.7。该阶段排在 apt 阶段之后（依赖 `apt`、`gpg` 与
-   XFCE 已就位），带独立指纹，只受开关与 `packages/gpu/*.deb` 影响。
+   XFCE 已就位），带独立指纹，只受开关、SoC 与 `packages/gpu/<SOC>/*.deb` 影响。
    阶段末尾有**分档自证**：会导致桌面起不来/驱动不可用的项（panfork 没降级成功、
    libmali 缺实体 blob、默认库路径被 `mali/` 接管）直接 `exit 1` 中止构建；
    固件类惰性问题只 WARN。
@@ -487,9 +487,20 @@ g25p0-00eac0`），而 Kali 自带的 Mesa 26 里 panfrost/panthor 只认主线 
 驱动"直接在镜像层面决定，而不是留着到板上再折腾。
 
 **开关**：`GPU_STACK` = `none`（默认）/ `panfork` / `libmali` / `both`
-（环境变量 > `config/gpu-stack.conf` > `none`）。实现是 `build-rootfs.sh` 的
-「阶段 2.5 GPU 用户态驱动栈」，带独立指纹 —— 只改开关或换 `packages/gpu/*.deb` 时，
+（环境变量 > `config/gpu-stack.conf` > `none`）；**`SOC`** = `rk3588`（默认）/ `rk3576`，
+决定 libmali 包目录、GPU 家族以及是否需要 CSF 固件。实现是 `build-rootfs.sh` 的
+「阶段 2.5 GPU 用户态驱动栈」，带独立指纹 —— 只改开关/SoC 或换 `packages/gpu/<SOC>/*.deb` 时，
 增量构建只会重跑这一段。
+
+**两种 SoC 的差异（选包前先看）**：
+
+| | rk3588 | rk3576 |
+|---|---|---|
+| GPU | Mali-G610 MP4（Valhall/CSF，`fb000000.gpu`，`arch 10.8.6`） | Mali-G52 MC3（Bifrost/JM，`27800000.gpu`，`arch 7.4.0`） |
+| libmali 包 | `libmali-valhall-g610-g24p0-x11-gbm` | `libmali-bifrost-g52-g24p0-x11-wayland-gbm` |
+| CSF 固件 | 需要（内嵌，但仍要 mask `set-mali-firmware`） | **没有这个环节**（构建阶段整段跳过） |
+| Vulkan | ✅ 1.3.276 | ❌ 包内无 Vulkan 库/ICD |
+| `glmark2` 预期 | 1000~2300（硬件） | 300~900（G52 约为 G610 的 1/4~1/3） |
 
 **版本搭配的口径（选 blob 时先看这条）**：内核 kbase DDK 与用户态 blob（mali-so）版本难以
 完全对上时，**DDK 可以高于 mali-so，不允许 mali-so 高于 DDK**（Rockchip 官方口径）。
@@ -502,7 +513,7 @@ g25p0-00eac0`），而 Kali 自带的 Mesa 26 里 panfrost/panthor 只认主线 
 |---|---|---|---|
 | `none` | 不装 | 无（软渲染基线 `glmark2`≈40） | 无 |
 | `panfork` | panfork mesa 23.x（PPA） | **X11 桌面 GL / glamor 硬件加速**（`glmark2` 1000~1600） | mesa 家族降级并 hold；联网拉 PPA + 从 Ubuntu jammy ports 补 `libllvm14` |
-| `libmali` | Rockchip 官方闭源 blob（`packages/gpu/*.deb`） | GLES 3.2 / EGL / Vulkan 1.3 / OpenCL 3.0 / 无 X 的 GBM 直出（`kmscube` 60fps） | 桌面仍软渲染（libmali 无桌面 GL） |
+| `libmali` | Rockchip 官方闭源 blob（`packages/gpu/<SOC>/*.deb`） | GLES / EGL / OpenCL / 无 X 的 GBM 直出（`kmscube` 60fps）；Vulkan 仅 rk3588 | 桌面仍软渲染（libmali 无桌面 GL） |
 | `both` | 两者 | 桌面走 panfork；计算/无 X 场景按需走 libmali | 两者之和 |
 
 **两个必须避开的坑**（都实际踩过，有日志实证）：
@@ -516,11 +527,13 @@ g25p0-00eac0`），而 Kali 自带的 Mesa 26 里 panfrost/panthor 只认主线 
    lightdm 反复重启（`Scheduled restart job, restart counter is at 12`）→ 每轮重启都
    重新 modeset HDMI → `dwhdmi-rockchip fde80000.hdmi: use tmds mode` 刷屏 + 桌面黑屏。
    **构建阶段会把它注释掉**，libmali 只按需用 `LD_LIBRARY_PATH` 启用（这也是上游推荐姿势）。
-2. **`mali-g610-firmware` 的错版固件 —— 必须 mask，不是卫生问题。**
+2. **`mali-g610-firmware` 的错版固件 —— 必须 mask，不是卫生问题（仅 rk3588）。**
    panfork 的 mesa 硬 `Depends: mali-g610-firmware`，所以必须装；但那个包（拆开看过）只提供
    `g15p0/g17p0/g18p0` 三份 CSF 固件，由 `set-mali-firmware.service` 按 `dmesg` 里的 DDK 版本挑选
    —— 本内核是 **g25p0**，匹配不上，落到 `*` 分支把 **g15p0** 固件链到
    `/lib/firmware/mali_csffw.bin`（板卡实测：`-> /lib/firmware/mali_csffw_g15p0/mali_csffw.bin`）。
+   ⚠️ **rk3576（Bifrost）没有这一节**：Mali-G52 是 JM 架构，kbase 不请求 csffw，
+   `NEEDS_CSF_FW=0` 时构建阶段整段跳过（deb 里也没有固件文件）。
 
    它的脚本是**每次开机无条件**这样干：
 
@@ -556,9 +569,9 @@ g25p0-00eac0`），而 Kali 自带的 Mesa 26 里 panfrost/panthor 只认主线 
 
 3. **firmware 阶段的 `cp -r` 会因 libmali 的存在而把 WiFi 固件嵌错一层。**
    GPU 阶段（阶段 2.5）跑在 firmware 阶段（阶段 5）**之前**，而装上 libmali deb 后
-   `/usr/lib/firmware` 一定已存在（它往那里放 `mali_csffw.bin`）。GNU `cp -r SRC DST/`
-   在 `DST/firmware` 已存在时会把整个源目录**再嵌一层** → `/usr/lib/firmware/firmware/aic8800/...`
-   → **新镜像掉 WiFi**。已改为合并式：
+   `/usr/lib/firmware` 可能已存在（rk3588 的包往那里放 `mali_csffw.bin`；rk3576 的包不带固件）。
+   GNU `cp -r SRC DST/` 在 `DST/firmware` 已存在时会把整个源目录**再嵌一层**
+   → `/usr/lib/firmware/firmware/aic8800/...` → **新镜像掉 WiFi**。已改为合并式（对两种 SoC 都安全）：
 
    ```bash
    mkdir -p ${chroot_dir}/usr/lib/firmware

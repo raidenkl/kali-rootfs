@@ -9,7 +9,8 @@
 | **Docker**（推荐） | 任意装了 docker 的机器 | 见第 2 节 |
 
 ### 关于gpu
-本仓库目前只适配了rk3588的gpu驱动，如果要给其他rk芯片的板卡使用，`GPU_STACK`需要选择`none`，具体可选参数可以查阅2.7章节。 
+GPU 用户态驱动栈目前适配 **rk3588**（Mali-G610 / Valhall）与 **rk3576**（Mali-G52 / Bifrost）
+两种 SoC；其他 RK 芯片的板卡请把 `GPU_STACK` 设为 `none`，具体可选参数可以查阅 2.7 章节。 
 
 ## 1.用法（裸机）
 ### 1.1 安装依赖
@@ -228,7 +229,17 @@ IMAGE=my-builder bash build/docker/build.sh
 GPU_STACK=both bash build/docker/build.sh       # panfork + libmali 都装
 GPU_STACK=panfork bash build/docker/build.sh    # 只装 panfork（X11 桌面 GL 加速）
 GPU_STACK=libmali bash build/docker/build.sh    # 只装 Rockchip 闭源 libmali
+
+# 目标 SoC（默认 rk3588）：决定用哪套 libmali、是否需要 CSF 固件
+SOC=rk3576 GPU_STACK=libmali bash build/docker/build.sh
 ```
+
+`SOC` 取值（环境变量 > `config/gpu-stack.conf` > `rk3588`）：
+
+| SOC | GPU | 架构 | libmali 包 | CSF 固件 | Vulkan |
+|---|---|---|---|---|---|
+| `rk3588` | Mali-G610 MP4 | Valhall / CSF | `libmali-valhall-g610-*` | 需要（本内核已内嵌） | ✅ |
+| `rk3576` | Mali-G52 MC3 | Bifrost / JM | `libmali-bifrost-g52-*` | **不需要** | ❌（该 blob 不含） |
 
 `GPU_STACK` 取值与优先级（环境变量 > `config/gpu-stack.conf` > `none`）：
 
@@ -236,13 +247,13 @@ GPU_STACK=libmali bash build/docker/build.sh    # 只装 Rockchip 闭源 libmali
 |---|---|---|---|
 | `none`（默认） | 不装，Kali 官方 Mesa 26 | 无。GL 走 `llvmpipe` 软渲染（glmark2 ≈ 40） | 无 |
 | `panfork` | panfork mesa（PPA，23.x） | **X11 桌面 GL / glamor 硬件加速**（glmark2 ≈ 1000~1600） | mesa 家族降级到 23.x 并 hold；需联网拉 PPA + 从 Ubuntu jammy ports 补一个 `libllvm14` |
-| `libmali` | Rockchip 闭源 libmali（`packages/gpu/*.deb`） | GLES 3.2 / EGL / Vulkan 1.3 / OpenCL 3.0 / 无 X 的 GBM 直出（`kmscube` 60fps） | 桌面仍是软渲染（libmali 无桌面 GL） |
+| `libmali` | Rockchip 闭源 libmali（`packages/gpu/<SOC>/*.deb`） | GLES / EGL / OpenCL / 无 X 的 GBM 直出（`kmscube` 60fps）；Vulkan 仅 rk3588 有 | 桌面仍是软渲染（libmali 无桌面 GL） |
 | `both`（推荐） | 两者 | 桌面走 panfork，计算/无 X 场景按需走 libmali | 同上两者之和 |
 
 切换开关后建议增量构建，只会重跑 GPU 阶段：
 
 ```bash
-INCREMENTAL=1 GPU_STACK=both bash build/docker/build.sh
+INCREMENTAL=1 SOC=rk3576 GPU_STACK=both bash build/docker/build.sh
 ```
 
 > 注意：`build-rootfs.sh` 的 firmware 阶段（拷贝 WiFi/BT 固件）**指纹只覆盖 `overlay-firmware/`

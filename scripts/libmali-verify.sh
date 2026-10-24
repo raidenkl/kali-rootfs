@@ -108,6 +108,11 @@ firmware_verdict() {
 # 把上面的判定翻译成人能读的一行（+ 需要处置时给出命令）
 firmware_report() {
 	local v kdk gen f sw
+	# Bifrost 是 JM 架构，kbase 不请求 csffw —— 整套固件判读对它是误导，直接跳过
+	if is_bifrost; then
+		ok "CSF 固件：GPU 为 Bifrost（arch $(gpu_arch)），JM 架构无固件环节 —— 无需 mali_csffw.bin"
+		return 0
+	fi
 	f="$(firmware_find || true)"
 	v="$(firmware_verdict)"
 	kdk="$(kernel_ver)"
@@ -146,6 +151,9 @@ firmware_report() {
 blob_path()  { find /usr/lib -maxdepth 3 -name 'libmali*.so*' -size +5M 2>/dev/null | head -1; }
 blob_ver()   { local b; b="$(blob_path)"; [[ -n "$b" ]] && grep -a -o -m1 -E 'g[0-9]{1,3}p[0-9]+' "$b" 2>/dev/null | head -1; }
 kernel_ver() { dmesg 2>/dev/null | grep -i 'Kernel DDK version' | tail -1 | grep -oE 'g[0-9]{1,3}p[0-9]+' | head -1; }
+# GPU 架构：10.x = Valhall(G610/G710，CSF)；7.x = Bifrost(G31/G52/G76，JM，无 CSF 固件)
+gpu_arch()   { dmesg 2>/dev/null | grep -m1 -oE 'arch [0-9]+\.[0-9]+\.[0-9]+' | awk '{print $2}'; }
+is_bifrost() { case "$(gpu_arch)" in 7.*) return 0 ;; *) return 1 ;; esac; }
 
 # 比较两个代号的代际：echo -1 表示 a<b、0 相等、1 表示 a>b；解析不出则输出空（调用方按"无法判定"处理）。
 # 纯参数展开实现（这里刻意不用 sed/awk：一是快，二是本机 Windows bash 里验证不了外部命令）。
@@ -274,7 +282,7 @@ status() {
 		case "$_cmp" in
 			0)  ok "用户态与内核 DDK 版本一致（$bv）" ;;
 			-1) ok "blob $bv < 内核 DDK $kv —— 官方允许的组合（DDK 可高于 mali-so）"
-				echo "    本板实测也支持：g13p0 / g24p0 两版用户态都能与 g25p0 内核正常通信" ;;
+				echo "    实测：RK3588（G610）上 g13p0/g24p0 均可用；RK3576（G52）用 g24p0" ;;
 			1)  warn "blob $bv > 内核 DDK $kv —— 官方明说【不允许】（mali-so 不能比 DDK 高），这是最可能的失败原因"
 				echo "    出路：换用 ≤ $kv 的用户态 blob，或把内核升到 ≥ $bv" ;;
 			*)  warn "版本号不同（用户态 $bv vs 内核 $kv），代号格式无法比较高低"
@@ -682,7 +690,7 @@ nodisp() {
 		|| warn "缺 /etc/OpenCL/vendors/mali.icd —— OpenCL 不会走 Mali"
 	[[ -f /usr/share/vulkan/icd.d/mali.json ]] \
 		&& echo "  Vulkan ICD: $(tr -d '\n' < /usr/share/vulkan/icd.d/mali.json)" \
-		|| warn "缺 /usr/share/vulkan/icd.d/mali.json —— Vulkan 不会走 Mali"
+		|| { if is_bifrost; then echo "  Vulkan ICD: 无 —— 本 SoC 的 libmali（bifrost-g52）不提供 Vulkan，属预期"; else warn "缺 /usr/share/vulkan/icd.d/mali.json —— Vulkan 不会走 Mali"; fi; }
 
 	# ICD 文件里写的是【裸库名】，能否解析决定该通路可不可用。
 	# 这里把状态一次列清 —— "ldconfig 缓存里没有"不等于"用不了"（dlopen 还会看
@@ -701,7 +709,7 @@ nodisp() {
 	done
 
 	# 多份 libmali 检测：两份 blob 会让 OpenCL 出现多个平台、程序可能选到不同版本。
-	# （本仓库固化时不需要担心：build-rootfs.sh 只装 packages/gpu/*.deb，且 README 明确
+	# （本仓库固化时不需要担心：build-rootfs.sh 只装 packages/gpu/<SOC>/*.deb，且 README 明确
 	#   警告不要同时放多个提供 libmali 的 deb；这里主要抓"手工装过好几份"的板子。）
 	local blobs nb
 	blobs="$(find /usr/lib/aarch64-linux-gnu -maxdepth 2 -name 'libmali*.so*' -size +5M 2>/dev/null)"

@@ -102,8 +102,24 @@ case "${GPU_STACK}" in
         none|panfork|libmali|both) ;;
         *) echo "GPU_STACK=${GPU_STACK} 无效（可选 none|panfork|libmali|both）"; exit 1 ;;
 esac
-export GPU_STACK    # chroot 子进程要读它（chroot 继承环境）
-echo "$(mode_of) GPU 驱动栈: GPU_STACK=${GPU_STACK}"
+# 目标 SoC：决定 libmali 包目录、GPU 家族、是否需要 CSF 固件（详见 config/gpu-stack.conf）
+SOC="${SOC:-rk3588}"
+case "${SOC}" in
+        rk3588) SOC_FAMILY=valhall; SOC_CSF_FW=1 ;;
+        rk3576) SOC_FAMILY=bifrost; SOC_CSF_FW=0 ;;
+        *) echo "SOC=${SOC} 无效（可选 rk3588|rk3576）"; exit 1 ;;
+esac
+case "${GPU_FAMILY:-unknown}" in
+        valhall|bifrost) ;;
+        *) GPU_FAMILY="${SOC_FAMILY}" ;;
+esac
+case "${NEEDS_CSF_FW:-}" in
+        0|1) ;;
+        *) NEEDS_CSF_FW="${SOC_CSF_FW}" ;;
+esac
+GPU_DIR=../packages/gpu/${SOC}
+export GPU_STACK SOC GPU_FAMILY NEEDS_CSF_FW   # chroot 子进程要读它们（chroot 继承环境）
+echo "$(mode_of) GPU 驱动栈: GPU_STACK=${GPU_STACK}  SOC=${SOC}  GPU_FAMILY=${GPU_FAMILY}  CSF_FW=${NEEDS_CSF_FW}"
 
 # ── 阶段 1：基础系统（debootstrap）───────────────────────────────────────
 # 复用条件（全部满足才跳过）：目录存在且完整 + 有完成标记 + arch/release/mirror 未变。
@@ -287,8 +303,11 @@ fi
 #      只认 g15p0/g17p0/g18p0，本内核是 g25p0 → 落到 * 分支，把 g15p0 的固件链到
 #      /lib/firmware/mali_csffw.bin（错版）。本内核的 CSF 固件其实是内嵌的，用不到
 #      它，所以 mask 掉该 service 并清掉它建的软链。
-GPU_DEB_LIST="$(ls -l ../packages/gpu/*.deb 2>/dev/null | awk '{print $5, $NF}' || true)"
-GPU_FP="$(fp_of "stack=${GPU_STACK} libmali_deb=[${GPU_DEB_LIST}]")"
+# 本阶段按 SoC 取包：packages/gpu/<SOC>/*.deb
+#   rk3588 → Mali-G610（Valhall/CSF，需要 CSF 固件，包内含 Vulkan）
+#   rk3576 → Mali-G52（Bifrost/JM，无 CSF 固件，包内无 Vulkan）
+GPU_DEB_LIST="$(ls -l "${GPU_DIR}"/*.deb 2>/dev/null | awk '{print $5, $NF}' || true)"
+GPU_FP="$(fp_of "stack=${GPU_STACK} soc=${SOC} fam=${GPU_FAMILY} csf=${NEEDS_CSF_FW} libmali_deb=[${GPU_DEB_LIST}]")"
 if [[ ${GPU_STACK} == "none" ]]; then
         echo "$(mode_of) GPU_STACK=none，跳过 GPU 用户态驱动栈（保持 Kali 官方 Mesa）"
 elif stage_done gpu && stage_fp_ok gpu "${GPU_FP}"; then
@@ -312,14 +331,14 @@ PEOF
         # libmali 分支的输入：本地 deb 拷进 chroot 的临时目录（装完删掉，不进镜像）
         if [[ ${GPU_STACK} == "libmali" || ${GPU_STACK} == "both" ]]; then
                 if [[ -n ${GPU_DEB_LIST} ]]; then
-                        # 硬断言：这里只允许放【一份】提供 libmali 的 deb。
+                        # 硬断言：同一 SoC 目录下只允许放【一份】提供 libmali 的 deb。
                         # 两份会导致系统出现两个 OpenCL 平台、两份 blob（各约 40~57MB），
                         # 程序按平台序号选，可能选到不同版本的 blob —— 排查起来极费劲
                         # （board 上手工装过 libmali-g610-x11 + Rockchip g24p0 deb，就是这个下场）。
                         # 注：本包与 Rockchip 那份都声明 Conflicts/Replaces: libmali，dpkg 层面
                         # 本就互斥，所以这里做构建期拦截而不是等 dpkg 报冲突。
                         GPU_NLIB=0
-                        for _d in ../packages/gpu/*.deb; do
+                        for _d in "${GPU_DIR}"/*.deb; do
                                 [[ -e ${_d} ]] || continue
                                 if dpkg-deb -f "${_d}" Package Provides 2>/dev/null | grep -qiE 'libmali'; then
                                         GPU_NLIB=$((GPU_NLIB + 1))
@@ -327,16 +346,23 @@ PEOF
                                 fi
                         done
                         if [[ ${GPU_NLIB} -gt 1 ]]; then
-                                echo "!! packages/gpu/ 下有 ${GPU_NLIB} 个提供 libmali 的 deb —— 拒绝构建"
+                                echo "!! ${GPU_DIR}/ 下有 ${GPU_NLIB} 个提供 libmali 的 deb —— 拒绝构建"
                                 echo "   两份 blob 会让镜像出现两个 OpenCL 平台、程序可能选到不同版本。"
                                 echo "   请只保留一份（取舍依据见 packages/gpu/README.md）后重试。"
                                 exit 1
                         fi
+                        # 包名与 GPU 家族必须匹配（避免把 g610 的包塞进 rk3576 目录）
+                        case "$(basename -a "${GPU_DIR}"/*.deb 2>/dev/null | tr '\n' ' ')" in
+                                *"${GPU_FAMILY}"*) ;;
+                                *) echo "!! ${GPU_DIR}/ 下的 deb 文件名不含 GPU 家族 '${GPU_FAMILY}' —— 拒绝构建"
+                                   echo "   rk3588 需要 libmali-valhall-g610-*，rk3576 需要 libmali-bifrost-g52-*"
+                                   exit 1 ;;
+                        esac
                         mkdir -p ${chroot_dir}/tmp/gpu
-                        cp -f ../packages/gpu/*.deb ${chroot_dir}/tmp/gpu/
-                        echo "$(mode_of) libmali 源包: $(basename -a ../packages/gpu/*.deb 2>/dev/null | tr '\n' ' ')"
+                        cp -f "${GPU_DIR}"/*.deb ${chroot_dir}/tmp/gpu/
+                        echo "$(mode_of) libmali 源包: $(basename -a "${GPU_DIR}"/*.deb 2>/dev/null | tr '\n' ' ')"
                 else
-                        echo "!! GPU_STACK=${GPU_STACK} 但 ../packages/gpu/ 下没有 deb —— libmali 将被跳过"
+                        echo "!! GPU_STACK=${GPU_STACK} 但 ${GPU_DIR}/ 下没有 deb —— libmali 将被跳过"
                         echo "   获取方式见 packages/gpu/README.md"
                 fi
         fi
@@ -347,6 +373,7 @@ set -eE
 trap 'echo Error: in $0 on line $LINENO' ERR
 
 STACK="${GPU_STACK}"
+NEEDS_FW="${NEEDS_CSF_FW:-1}"     # 1=Valhall/CSF（需要 csffw 固件处理）；0=Bifrost（无固件环节）
 PKGS_MESA="libgl1-mesa-dri libglx-mesa0 libegl-mesa0 libglapi-mesa libgbm1"
 
 if [ "$STACK" = "panfork" ] || [ "$STACK" = "both" ]; then
@@ -398,29 +425,45 @@ JEOF
 	apt-mark hold $PKGS_MESA >/dev/null
 	apt-mark hold libllvm14 >/dev/null
 
-	# 4) mali-g610-firmware（mesa 的硬依赖，装包时已连带装上）必须留着满足 Depends，
+	# 4) 仅 Valhall/CSF（rk3588）需要处理 CSF 固件：
+	#    mali-g610-firmware（mesa 的硬依赖，装包时已连带装上）必须留着满足 Depends，
 	#    但它的 set-mali-firmware.service 只认 g15p0/g17p0/g18p0，本内核是 g25p0 →
 	#    落到 * 分支 → 把 g15p0 固件链到 /lib/firmware/mali_csffw.bin。
 	#    本内核的 CSF 固件是【内嵌】的（CONFIG_MALI_CSF_INCLUDE_FW=y，内核镜像里含注册名
 	#    g25p0-00eac0.mali_csffw.bin），磁盘这份永不生效；而那个 service 每次开机都会
 	#    `rm -f` 该路径再建软链 —— 连 Rockchip libmali deb 装进去的真文件都会被它顶掉。
 	#    所以：disable + mask 它，并清掉它留下的错版软链。
-	systemctl disable set-mali-firmware.service >/dev/null 2>&1 || true
-	systemctl mask    set-mali-firmware.service >/dev/null 2>&1 || true
+	#
+	#    Bifrost（rk3576 / Mali-G52）是 JM 架构，kbase 不请求 csffw 固件，整段跳过。
+	if [ "$NEEDS_FW" = "1" ]; then
+		systemctl disable set-mali-firmware.service >/dev/null 2>&1 || true
+		systemctl mask    set-mali-firmware.service >/dev/null 2>&1 || true
 
-	# 只删"指向 mali_csffw_g1*p0 的软链"。若该路径是别的包装进去的真文件
-	# （例如 libmali 分支那份 Rockchip 固件），一律不动 —— 那是合法产物。
-	for FW in /lib/firmware/mali_csffw.bin /usr/lib/firmware/mali_csffw.bin; do
-		if [ -L "$FW" ]; then
-			tgt="$(readlink "$FW")"
-			case "$tgt" in
-				*mali_csffw_g1*p0*)
-					rm -f "$FW"; echo "[gpu] 已清掉错版固件软链: $FW -> $tgt" ;;
-				*)
-					echo "[gpu] 保留固件软链（非 g1*p0 错版）: $FW -> $tgt" ;;
-			esac
+		# 只删"指向 mali_csffw_g1*p0 的软链"。若该路径是别的包装进去的真文件
+		# （例如 libmali 分支那份 Rockchip 固件），一律不动 —— 那是合法产物。
+		for FW in /lib/firmware/mali_csffw.bin /usr/lib/firmware/mali_csffw.bin; do
+			if [ -L "$FW" ]; then
+				tgt="$(readlink "$FW")"
+				case "$tgt" in
+					*mali_csffw_g1*p0*)
+						rm -f "$FW"; echo "[gpu] 已清掉错版固件软链: $FW -> $tgt" ;;
+					*)
+						echo "[gpu] 保留固件软链（非 g1*p0 错版）: $FW -> $tgt" ;;
+				esac
+			fi
+		done
+	else
+		# Bifrost（rk3576）不需要 CSF 固件；但 panfork 的 mesa 会硬依赖 mali-g610-firmware
+		# 把它带进来，那个 service 在 rk3576 上 grep "fb000000.gpu" 会失败、落到 * 分支去链
+		# g15p0 —— 对 Bifrost 惰性无害，但没必要留一个开机改文件的 unit，顺手 mask。
+		if [ -f /usr/lib/systemd/system/set-mali-firmware.service ] || [ -L /etc/systemd/system/set-mali-firmware.service ]; then
+			systemctl disable set-mali-firmware.service >/dev/null 2>&1 || true
+			systemctl mask    set-mali-firmware.service >/dev/null 2>&1 || true
+			echo "[gpu] GPU 家族为 Bifrost（无 CSF）：已 mask 残留的 set-mali-firmware.service"
+		else
+			echo "[gpu] GPU 家族为 Bifrost（无 CSF）：跳过 mali_csffw 固件处理"
 		fi
-	done
+	fi
 
 	# 5) 自证：mesa 必须真的来自 panfork。装不上时不静默通过 —— 否则镜像会"看起来
 	#    有 GPU 驱动"，实际仍走 llvmpipe，问题要到板卡上才发现。
@@ -513,20 +556,24 @@ GEOF
                 fi
         fi
         if [[ ${GPU_STACK} != "none" ]]; then
-                if [[ -L ${chroot_dir}/etc/systemd/system/set-mali-firmware.service ]]; then
-                        echo "[gpu][OK]   set-mali-firmware.service 已 masked"
+                if [[ ${NEEDS_CSF_FW} == 1 ]]; then
+                        if [[ -L ${chroot_dir}/etc/systemd/system/set-mali-firmware.service ]]; then
+                                echo "[gpu][OK]   set-mali-firmware.service 已 masked"
+                        else
+                                echo "[gpu][WARN] set-mali-firmware.service 未 masked（开机仍会 rm -f 该路径）"
+                        fi
+                        # /lib 与 /usr/lib 在 usrmerge 下是同一文件，报一次就够
+                        for FW in ${chroot_dir}/lib/firmware/mali_csffw.bin ${chroot_dir}/usr/lib/firmware/mali_csffw.bin; do
+                                [[ -L "$FW" ]] || continue
+                                FW_T="$(readlink "$FW")"
+                                case "$FW_T" in
+                                        *mali_csffw_g1*p0*) echo "[gpu][WARN] 镜像里残留错版固件软链: $FW -> $FW_T（内嵌固件使其惰性，仅提示）" ;;
+                                esac
+                                break
+                        done
                 else
-                        echo "[gpu][WARN] set-mali-firmware.service 未 masked（开机仍会 rm -f 该路径）"
+                        echo "[gpu][OK]   GPU 家族为 Bifrost：无 CSF 固件环节，跳过固件自证"
                 fi
-                # /lib 与 /usr/lib 在 usrmerge 下是同一文件，报一次就够
-                for FW in ${chroot_dir}/lib/firmware/mali_csffw.bin ${chroot_dir}/usr/lib/firmware/mali_csffw.bin; do
-                        [[ -L "$FW" ]] || continue
-                        FW_T="$(readlink "$FW")"
-                        case "$FW_T" in
-                                *mali_csffw_g1*p0*) echo "[gpu][WARN] 镜像里残留错版固件软链: $FW -> $FW_T（内嵌固件使其惰性，仅提示）" ;;
-                        esac
-                        break
-                done
                 [[ -L ${chroot_dir}/usr/lib/firmware/firmware ]] \
                         && echo "[gpu][WARN] 存在自指软链 /usr/lib/firmware/firmware（usrmerge 下的既有行为，无害）"
         fi
@@ -628,12 +675,21 @@ chroot ${chroot_dir} /bin/bash -c "systemctl enable boot_init"
 # #12 内核降级成 #11（第二次开机卡死）。现在改为构建期只解包 lib/modules，
 # /boot 从头到尾不被触碰，deb 自带的 boot/ 部分直接丢弃。
 # 编译号说明：deb 与 boot.img 非同一次构建时（SDK 分步打包常见），只要 release
-# 串一致（如 6.1.99-rk3588），模块 vermagic 相同即可正常 modprobe —— 见下方
+# 串一致（如 6.1.99-rk3588 / 6.1.99-rk3576），模块 vermagic 相同即可正常 modprobe —— 见下方
 # WARN 提示；只有跨内核版本/跨配置才是真问题。
 # 注意：本阶段指纹只含 deb 的大小/时间，不含本段脚本正文 —— 改了下面命令后
 # 必须 rm -f ${STAGE_DIR}/kmod.* 才会重跑（与 firmware 阶段同一惯例）。
-KMOD_VER=6.1.99-rk3588
-KMOD_FP="$(fp_of "deb=$(stat -c '%s %Y' ${overlay_dir}/usr/local/linux-image.deb 2>/dev/null || echo none)")"
+KMOD_DEB="${overlay_dir}/usr/local/linux-image.deb"
+# 内核 release 串：优先环境变量 KMOD_VER；否则从 deb 里的 lib/modules/<ver>/ 探测；
+# 探测不到再退回按 SoC 的默认值。这样换 rk3576 内核时不用改脚本。
+if [[ -z ${KMOD_VER:-} ]]; then
+        KMOD_VER="$(dpkg-deb --fsys-tarfile "${KMOD_DEB}" 2>/dev/null \
+                | tar -t 2>/dev/null \
+                | sed -n 's|^\./lib/modules/\([^/]*\)/.*|\1|p' | head -1 || true)"
+fi
+[[ -n ${KMOD_VER} ]] || KMOD_VER="6.1.99-${SOC}"
+echo "$(mode_of) 内核 modules 版本: KMOD_VER=${KMOD_VER}"
+KMOD_FP="$(fp_of "deb=$(stat -c '%s %Y' ${KMOD_DEB} 2>/dev/null || echo none)")"
 if stage_done kmod && stage_fp_ok kmod "${KMOD_FP}"; then
         echo "$(mode_of) 跳过 modules 固化（deb 未变化）"
 else
@@ -643,7 +699,7 @@ else
 
         # ① 只解包 lib/modules 到临时目录（deb 里的 boot/ 等其余内容全部忽略）
         rm -rf ${chroot_dir}/tmp/kmod && mkdir -p ${chroot_dir}/tmp/kmod
-        dpkg-deb -x ${overlay_dir}/usr/local/linux-image.deb ${chroot_dir}/tmp/kmod
+        dpkg-deb -x ${KMOD_DEB} ${chroot_dir}/tmp/kmod
         # ② 整目录替换，避免新旧 deb 的模块混装
         rm -rf ${chroot_dir}/lib/modules/${KMOD_VER}
         mkdir -p ${chroot_dir}/lib/modules
@@ -670,8 +726,8 @@ else
         # 若跨了内核版本/配置，modprobe 会失败 —— 此时让两者同源。
         KMOD_BANNER_RE='#[0-9]+ SMP [A-Za-z]{3} [A-Za-z]{3} +[0-9]+ [0-9:]{8} UTC [0-9]{4}'
         DEB_BANNER=""
-        if [ -f ${overlay_dir}/usr/local/linux-image.deb ]; then
-                DEB_BANNER="$(dpkg-deb --fsys-tarfile ${overlay_dir}/usr/local/linux-image.deb 2>/dev/null \
+        if [ -f ${KMOD_DEB} ]; then
+                DEB_BANNER="$(dpkg-deb --fsys-tarfile ${KMOD_DEB} 2>/dev/null \
                         | tar -xO ./boot/Image-${KMOD_VER} 2>/dev/null \
                         | grep -a -oE "${KMOD_BANNER_RE}" | head -1 || true)"
         fi
@@ -808,7 +864,7 @@ if [[ ${INCREMENTAL} == 1 ]]; then
         echo "[增量] rootfs 目录树已更新：build/rootfs/"
         echo "       已完成阶段：$(ls ${STAGE_DIR} 2>/dev/null | tr '\n' ' ')"
         echo "       注意：build/rootfs.img 还是旧内容，需要重新打包才会生效："
-        echo "         cd build && bash mk-image.sh rootfs && bash mk-updateimg.sh rk3588 emmc"
+        echo "         cd build && bash mk-image.sh rootfs && bash mk-updateimg.sh ${SOC} emmc"
 fi
 
 # Tar the entire rootfs

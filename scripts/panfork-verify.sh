@@ -417,9 +417,12 @@ check() {
 #   ① 内核/设备 ② 驱动归属 ③ X 与桌面 GL ④ 压测（得分 + 负载 + X 是否存活）
 #   ⑤ 计算通路共存（OpenCL，不需要显示器）⑥ 无 X 的 DRM/GBM 直出（给出命令，不自动执行）
 gpu_devfreq() {
-	local d
+	local d t
 	d="$(ls -d /sys/class/devfreq/*gpu* 2>/dev/null | head -1)"
-	[[ -z "$d" ]] && d=/sys/devices/platform/fb000000.gpu/devfreq/fb000000.gpu
+	if [[ -z "$d" ]]; then
+		t="$(ls -d /sys/devices/platform/*.gpu 2>/dev/null | head -1)"
+		[[ -n "$t" ]] && d="${t}/devfreq/${t##*/}"
+	fi
 	[[ -d "$d" ]] && echo "$d"
 }
 
@@ -573,7 +576,7 @@ verify() {
 				echo "    → 要让 OpenCL/Vulkan 免设置可用： sudo bash libmali-verify.sh --route"
 			fi
 		fi
-		if echo "$co" | grep -qi 'Mali-G610'; then
+		if echo "$co" | grep -qiE 'Mali-G[0-9]+'; then
 			ok "OpenCL 能枚举 Mali（libmali 的按需通路完好，与 panfork 共存正常）"
 			echo "$co" | grep -iE '^\s*(Device Name|Device Version)' | head -2 | sed 's/^/    /'
 		else
@@ -611,9 +614,9 @@ verify() {
 	fi
 	echo
 	echo "  判定口诀："
-	echo "    ③ 出现 Mali-G610 (Panfrost)  = 桌面 GL 已硬件加速"
+	echo "    ③ 出现 Mali-G** (Panfrost)  = 桌面 GL 已硬件加速"
 	echo "    ④ 得分 1500~2300 且 X 存活   = 呈现路径可用"
-	echo "    ⑤ clinfo 能看到 Mali-G610    = 计算通路（libmali）与 panfork 共存良好"
+	echo "    ⑤ clinfo 能看到 Mali         = 计算通路（libmali）与 panfork 共存良好"
 }
 
 # ── 5 收集证据 ─────────────────────────────────────────────────────────────

@@ -1,8 +1,10 @@
 [Unit]
 Description=Set GPU governor to performance
+# SoC 无关：rk3588 是 fb000000.gpu、rk3576 是 27800000.gpu，
+# 统一从 /sys/class/devfreq 里按 *gpu* 找，避免写死平台地址。
 
 [Service]
-ExecStart=/usr/bin/bash -c 'echo performance > /sys/devices/platform/fb000000.gpu/devfreq/fb000000.gpu/governor || true'
+ExecStart=/usr/bin/bash -c 'for d in /sys/class/devfreq/*gpu*; do [ -w "$d/governor" ] && echo performance > "$d/governor"; done; true'
 Type=oneshot
 
 [Install]

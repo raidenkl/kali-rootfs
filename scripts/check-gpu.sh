@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# check-gpu.sh —— 在【板卡上】运行，逐层确认 RK3588 / Mali-G610 的 GPU 是否真的在工作
+# check-gpu.sh —— 在【板卡上】运行，逐层确认 Rockchip（RK3588/RK3576）Mali GPU 是否真的在工作
 #
 # 用法：
 #   sudo bash check-gpu.sh            # 只做静态检查（不跑分）
@@ -16,11 +16,17 @@
 BENCH=0
 [[ "$1" == "--bench" ]] && BENCH=1
 
+# SoC 无关：rk3588 = fb000000.gpu，rk3576 = 27800000.gpu；统一从 /sys/class/devfreq 找
 GPU_DEVFREQ=""
-for p in /sys/devices/platform/fb000000.gpu/devfreq/fb000000.gpu \
-         /sys/class/devfreq/fb000000.gpu; do
+for p in /sys/class/devfreq/*gpu* /sys/devices/platform/*.gpu/devfreq/*.gpu; do
 	[[ -d "$p" ]] && GPU_DEVFREQ="$p" && break
 done
+GPU_DEV="${GPU_DEVFREQ##*/}"
+if [[ -z "$GPU_DEV" ]]; then
+	_t="$(ls -d /sys/devices/platform/*.gpu 2>/dev/null | head -1)"
+	GPU_DEV="${_t##*/}"
+fi
+GPU_ARCH=""
 
 LIBA=/usr/lib/aarch64-linux-gnu
 PASS=0; WARN=0; FAIL=0
@@ -35,11 +41,12 @@ MODEL="$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo unknown)"
 echo "  板卡型号: ${MODEL}"
 COMPAT="$(tr '\0' ',' < /proc/device-tree/compatible 2>/dev/null | sed 's/,$//')"
 echo "  compatible: ${COMPAT}"
-if [[ "$COMPAT" == *rk3588* ]]; then
-	ok "识别到 RK3588 系列 SoC（GPU 为 Mali-G610 MP4）"
-else
-	warn "未匹配到 rk3588*，确认板卡 DTB 选择是否正确（/boot/rk-kernel.dtb 软链）"
-fi
+case "$COMPAT" in
+	*rk3588*) ok "识别到 RK3588 系列 SoC（GPU 为 Mali-G610 MP4，Valhall/CSF）" ;;
+	*rk3576*) ok "识别到 RK3576 系列 SoC（GPU 为 Mali-G52 MC3，Bifrost/JM）" ;;
+	*rk356*)  ok "识别到 RK356x 系列 SoC（GPU 为 Mali-G52，Bifrost/JM）" ;;
+	*) warn "未匹配到 rk3588/rk3576/rk356*，确认板卡 DTB 选择是否正确（/boot/rk-kernel.dtb 软链）" ;;
+esac
 
 # ── L2 内核驱动（Arm kbase / 或主线 panthor）────────────────────────────────
 sec "L2 内核驱动"
@@ -49,9 +56,19 @@ else
 	bad "dmesg 未见 'Probed as mali0' —— kbase 没起来，GPU 一定不可用"
 fi
 
-GPU_LINE="$(dmesg 2>/dev/null | grep -iE 'arch 10\.8\.6|GPU identified as' | tail -1)"
-[[ -n "$GPU_LINE" ]] && ok "GPU 识别: ${GPU_LINE#*] }" \
-	|| warn "未见 'GPU identified as ... arch 10.8.6'（G610 应为 arch 10.8.6）"
+GPU_LINE="$(dmesg 2>/dev/null | grep -iE 'GPU identified as' | tail -1)"
+GPU_ARCH="$(echo "$GPU_LINE" | grep -oE 'arch [0-9]+\.[0-9]+\.[0-9]+' | awk '{print $2}' | head -1)"
+if [[ -n "$GPU_LINE" ]]; then
+	ok "GPU 识别: ${GPU_LINE#*] }"
+	case "$GPU_ARCH" in
+		10.*) echo "  → arch ${GPU_ARCH} = Valhall（G610/G710 类，CSF 架构，需要 csffw 固件）" ;;
+		7.*)  echo "  → arch ${GPU_ARCH} = Bifrost（G31/G52/G76 类，JM 架构，无 CSF 固件）" ;;
+		"")   : ;;
+		*)    echo "  → arch ${GPU_ARCH}（未归类，按 GPU 家族继续看）" ;;
+	esac
+else
+	warn "未见 'GPU identified as ... arch X.Y.Z' —— 内核可能没识别到 GPU"
+fi
 
 DDK="$(dmesg 2>/dev/null | grep -i 'Kernel DDK version' | tail -1)"
 [[ -n "$DDK" ]] && ok "内核 DDK: ${DDK#*] }" || warn "未见 Kernel DDK version 行"
@@ -62,16 +79,16 @@ for pat in 'Failed to power up GPU' 'Failed to reset GPU' 'GPU fault' 'Unhandled
 	fi
 done
 
-if grep -qE '^(mali_kbase|panthor) ' /proc/modules 2>/dev/null; then
-	ok "内核模块已加载: $(awk '/^(mali_kbase|panthor) /{print $1}' /proc/modules | tr '\n' ' ')"
-elif [[ -d /sys/module/panthor || -d /sys/module/mali_kbase ]]; then
-	ok "/sys/module 下有驱动条目（$(ls -d /sys/module/*mali* /sys/module/*panthor* 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' ')）"
+if grep -qE '^(mali_kbase|bifrost_kbase|midgard_kbase|panthor) ' /proc/modules 2>/dev/null; then
+	ok "内核模块已加载: $(awk '/^(mali_kbase|bifrost_kbase|midgard_kbase|panthor) /{print $1}' /proc/modules | tr '\n' ' ')"
+elif [[ -d /sys/module/panthor || -d /sys/module/mali_kbase || -d /sys/module/bifrost_kbase ]]; then
+	ok "/sys/module 下有驱动条目（$(ls -d /sys/module/*mali* /sys/module/*kbase* /sys/module/panthor 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' ')）"
 elif dmesg 2>/dev/null | grep -qiE 'mali .*\.gpu:|Kernel DDK version|rknpu.*npu'; then
 	ok "驱动已编译进内核镜像（内建驱动不会出现在 /proc/modules，以 dmesg 为准）"
 	[[ -n "$(ls -d /sys/module/*mali* /sys/module/*kbase* 2>/dev/null)" ]] \
 		&& echo "  /sys/module 里与 mali 相关的条目: $(ls -d /sys/module/*mali* /sys/module/*kbase* 2>/dev/null | xargs -n1 basename | tr '\n' ' ')"
 else
-	bad "内核里找不到 mali_kbase/panthor 的任何痕迹"
+	bad "内核里找不到 mali_kbase/bifrost_kbase/panthor 的任何痕迹"
 fi
 
 # 决定用户态该用哪套驱动：上游 Mesa 的 panfrost/panthor 只能配主线 panthor
@@ -83,10 +100,14 @@ elif [[ -c /dev/mali0 ]] || dmesg 2>/dev/null | grep -qi 'Kernel DDK version'; t
 "② Rockchip libmali（只有 GLES/EGL，桌面仍 llvmpipe，但 GLES 应用/视频/浏览器可硬加速）"
 fi
 
-# ── L2.5 CSF 固件 ───────────────────────────────────────────────────────────
-# 本板 kbase 是 CSF 模式，需要 mali_csffw.bin。但本内核把它【编译进内核】了
-# （CONFIG_MALI_CSF_INCLUDE_FW=y），磁盘上那份其实永远不会被读 —— 所以这里的判读
-# 重点不是"文件在不在"，而是"有没有被人塞了错版、以及有没有个 service 在开机改它"。
+# ── L2.5 CSF 固件（仅 Valhall/CSF 需要）────────────────────────────────────
+# Valhall（G610 等）kbase 需要 mali_csffw.bin；本内核把它编进内核里，磁盘那份惰性，
+# 所以判读重点是"有没有错版残留、有没有 service 开机改它"。
+# Bifrost（G52 等）是 JM 架构，kbase 不请求 csffw —— 整段跳过。
+if [[ "$GPU_ARCH" == 7.* ]]; then
+	sec "L2.5 CSF 固件"
+	ok "GPU 为 Bifrost（arch ${GPU_ARCH}）：JM 架构，无 CSF 固件环节（无需 mali_csffw.bin）"
+else
 sec "L2.5 CSF 固件"
 KDK_GEN="$(dmesg 2>/dev/null | grep -i 'Kernel DDK version' | tail -1 | grep -oE 'g[0-9]+p[0-9]+' | head -1)"
 KIMG=""
@@ -147,6 +168,7 @@ if dmesg 2>/dev/null | grep -qiE 'Direct firmware load.*(csffw|mali)|Failed to l
 	dmesg 2>/dev/null | grep -iE 'Direct firmware load|firmware' | tail -3 | sed 's/^/    /'
 	bad "dmesg 里有固件直载/加载失败记录 —— 说明内核在用磁盘固件，这类问题要当真"
 fi
+fi
 
 # ── L3 设备节点 ─────────────────────────────────────────────────────────────
 sec "L3 设备节点"
@@ -183,7 +205,7 @@ if [[ -n "$GPU_DEVFREQ" ]]; then
 	[[ "$gov" == "performance" ]] && ok "governor 已是 performance" \
 		|| warn "governor=$gov（期望 performance）。该 service 带 '|| true'，sysfs 路径不符时静默失效"
 else
-	bad "找不到 fb000000.gpu 的 devfreq 节点，GPU 电源/时钟框架可能没注册"
+	bad "找不到 ${GPU_DEV:-GPU} 的 devfreq 节点，GPU 电源/时钟框架可能没注册"
 fi
 if [[ -r /sys/kernel/debug/mali0/version ]]; then
 	ok "debugfs mali0/version: $(tr '\n' ' ' < /sys/kernel/debug/mali0/version 2>/dev/null)"
@@ -350,10 +372,14 @@ if [[ "$BENCH" == "1" ]]; then
 		else
 			warn "频率没变化，重跑并同时观察 $GPU_DEVFREQ/load"
 		fi
-		echo "  参考：G610 跑 glmark2 得分约 1500~2300；几百 → 十有八九是软渲染"
+		case "$GPU_ARCH" in
+			10.*) echo "  参考：Valhall（G610 类）跑 glmark2 约 1000~2300；几百 → 十有八九是软渲染" ;;
+			7.*)  echo "  参考：Bifrost（G52 类）跑 glmark2 约 300~900（约为 G610 的 1/4~1/3）；几十 → 软渲染" ;;
+			*)    echo "  参考：G610 级约 1500~2300、G52 级约 300~900；个位数/几十 → 软渲染" ;;
+		esac
 	fi
 	sec "视频编解码（属 VPU/MPP，不是 GPU，但一起验更省事）"
-	for f in mpp_service rga3; do
+	for f in mpp_service rga; do
 		dmesg 2>/dev/null | grep -qi "$f.*probe\|$f.*init" && ok "$f 已初始化" || warn "$f 未见初始化日志"
 	done
 	mpv --version >/dev/null 2>&1 && echo "  mpv: $(mpv --version | head -1)"
