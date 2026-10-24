@@ -36,9 +36,33 @@ PPA_URI="https://ppa.launchpadcontent.net/liujianfeng1994/panfork-mesa/ubuntu"
 # 本次要降级的包：DRI 驱动 + GLX/EGL/GLAPI 的 Mesa 实现 + GBM（必须与 DRI 驱动同版）。
 # 注：PPA 版本带 epoch（1:23.0.5 > 26.1.6），所以对 apt 而言是"升级"，但按 PIN 1001 会被优先选中。
 MESA_PKGS="libgl1-mesa-dri libglx-mesa0 libegl-mesa0 libglapi-mesa libgbm1"
+# ⚠ 上面这份是"候选清单"，不是最终清单：Kali 26 起 libglapi-mesa 已被并入
+# libgl1-mesa-dri，包本身不存在 —— 直接拿它去 apt-get install 会让整条命令失败
+# （E: Unable to locate package），而不是"少装一个"。所以这里按实际可得性过滤。
+MESA_PKGS_CAND="$MESA_PKGS"
+pkg_avail() { apt-cache policy "$1" 2>/dev/null | awk '/Candidate:/{print $2; exit}' | grep -qv '(none)'; }
+MESA_PKGS=""
+for _p in $MESA_PKGS_CAND; do
+	pkg_avail "$_p" && MESA_PKGS="${MESA_PKGS} ${_p}"
+done
+MESA_PKGS="${MESA_PKGS# }"
+[[ -n "$MESA_PKGS" ]] || MESA_PKGS="libgl1-mesa-dri"
+
 # 同属 mesa 家族、PPA 里也有 panfork 版本，但本次【不降级】——降级它们对桌面 GL 无益，
 # 反而会连带影响 Vulkan/VA-API。装完后统一 hold，避免被 apt upgrade 顺手降级。
 PROTECT_PKGS="mesa-vulkan-drivers mesa-va-drivers mesa-vdpau-drivers libosmesa6 libgles2-mesa libgl1-mesa-glx libwayland-egl1-mesa mesa-opencl-icd"
+
+# ── GPU 架构判别（决定要不要碰 CSF 固件、要不要给 JM 风险提示）─────────────
+# dmesg 形如：GPU identified as 0x2 arch 7.4.0 r1p0 status 0
+#   arch 6.x/7.x = Bifrost（G31/G51/G52/G76，JM 架构，无 CSF）
+#   arch 9.x+    = Valhall 及以后（G57/G610/G710…，CSF 机型）
+gpu_arch() {
+	dmesg 2>/dev/null \
+		| sed -n 's/.*GPU identified as .*arch \([0-9]\+\.[0-9]\+\.[0-9]\+\).*/\1/p' \
+		| tail -1
+}
+is_bifrost() { case "$(gpu_arch)" in 6.*|7.*) return 0 ;; *) return 1 ;; esac; }
+is_csf()     { case "$(gpu_arch)" in 9.*|1[0-4].*) return 0 ;; *) return 1 ;; esac; }
 
 DO="" ; ASSUME_YES=0 ; LOCAL_KEY=""
 while [[ $# -gt 0 ]]; do
@@ -102,9 +126,6 @@ ensure_x() {
 # 取到当前 mesa 相关包的版本，供前后对比
 mesa_versions() {
 	dpkg-query -W -f='  ${Package} ${Version}\n' $MESA_PKGS 2>/dev/null
-	for b in libgbm1; do
-		dpkg-query -W -f="  \${Package} \${Version}\n" "$b" 2>/dev/null
-	done
 }
 
 # ── 0 体检（无参数时的行为）────────────────────────────────────────────────
@@ -201,6 +222,10 @@ EOF
 # ── 2 只读探查 ─────────────────────────────────────────────────────────────
 probe() {
 	say "② 该 PPA 提供的 mesa 包（装之前先看清楚）"
+	if [[ ! -f "$SRC" ]]; then
+		warn "PPA 源还没配置（$SRC 不存在）：现在看到的是 Kali 官方候选，看不到 panfork 的 23.x"
+		echo "  先跑：sudo bash $0 --setup"
+	fi
 	echo "  --- 按 origin 列出 ---"
 	local listed
 	listed="$(apt list -a '?origin(LP-PPA-liujianfeng1994-panfork-mesa)' 2>/dev/null | grep -v '^$' | grep -v '^Listing')"
@@ -210,28 +235,39 @@ probe() {
 		echo "    （该查询无结果或语法不被支持，以下面的 policy 为准）"
 	fi
 	echo "  --- 候选版本 ---"
-	apt-cache policy $MESA_PKGS libgbm1 2>/dev/null | sed 's/^/    /'
+	apt-cache policy $MESA_PKGS 2>/dev/null | sed 's/^/    /'
 	echo
 	warn "确认上面是否出现 panfork 的 23.x，且候选来自 LP-PPA-liujianfeng1994-panfork-mesa。"
 	echo
-	echo "  本脚本要装的（定向降级）:"
-	echo "    $MESA_PKGS"
-	echo "  不动的（装完会 hold 在 26.x）:"
+	echo "  本脚本要降级的（按本机可得的包动态生成）:"
+	echo "    ${MESA_PKGS:-（空）}"
+	echo "  候选清单（不存在的包会被自动剔除，例如 Kali 26 已没有 libglapi-mesa）:"
+	echo "    $MESA_PKGS_CAND"
+	echo "  不动的（装完会 hold 在当前版本）:"
 	echo "    $PROTECT_PKGS"
 	echo
 	echo "  另注：这个 PPA 里还有几个与 libmali 路线相关的包，本次不装、先记下——"
-	echo "    libdri2to3        DRI2→DRI3 转译层（很可能正是 libmali 在 X11 下缺的那一块）"
-	echo "    libmali-g610-x11  libmali 的 X11 变体；malirun 按需运行 libmali 的包装器"
-	echo "    mali-g610-firmware  GPU 固件包（替代手动装 deb 里的 firmware）"
-	echo "  若 panfork 失败想回 libmali 路线，可用“libdri2to3 + libmali-g610-x11 + malirun“再试一次 X11"
-	echo "  （这比我们手搓 LD_LIBRARY_PATH 更正统，且不必全局注入，不会破坏 Xorg）"
+	echo "    libdri2to3        DRI2→DRI3 转译层（libmali 在 X11 下缺的那一块）"
+	echo "    libmali-g610-x11  libmali 的 X11 变体（**仅 Valhall/G610 机型**）"
+	echo "    malirun           按需运行 libmali 的包装器"
+	echo "    mali-g610-firmware  GPU 固件包（仅 CSF 机型需要）"
+	echo "  若 panfork 失败想回 libmali 路线，可用“libdri2to3 + libmali-*-x11 + malirun”再试一次 X11"
+	echo "  （比手搓 LD_LIBRARY_PATH 更正统，且不必全局注入，不会破坏 Xorg）"
+
+	if is_bifrost; then
+		say "本板风险提示：Bifrost / JM（arch=$(gpu_arch)）"
+		echo "  panfork 的 kbase 后端主战场是 CSF 的 Valhall（G610/G710）；社区在 G52/G57 这类"
+		echo "  非 CSF 设备上实测报过 'syncobj ... wait timeout' / 'Atom X reported event 0x58'，"
+		echo "  帧率掉到个位数。所以【不能用 rk3588 的经验类比本板】，必须靠 --check 的"
+		echo "  renderer 与 glmark2（桌面 GL，不是 -es2）来判定，不要只看'装成功了'。"
+	fi
 }
 
 # ── 2.5 依赖体检 ───────────────────────────────────────────────────────────
 # panfork 的 mesa 是 jammy 期构建，硬依赖 libllvm14；同时依赖 PPA 里的 mali-g610-firmware。
 # 前者 Kali 已没有，后者可能与厂商 libmali deb 争同一个固件文件 —— 这两条就是装不上的常见原因。
 deps() {
-	say "依赖体检"
+	say "依赖体检（只读；本命令不会安装任何东西，-s 均为 dry-run 预演）"
 	echo "  --- libllvm14（llvmpipe/swrast 用；panfrost 本身不需要，但 dpkg 的 Depends 要求）---"
 	apt-cache policy libllvm14 2>/dev/null | sed 's/^/    /'
 	local c14
@@ -240,32 +276,47 @@ deps() {
 		&& bad "libllvm14 不可用 → 需要从 Ubuntu jammy ports 补，或用 dpkg --force-depends 绕过" \
 		|| ok "libllvm14 可用: $c14"
 
-	echo
-	echo "  --- mali-g610-firmware（PPA 提供，panfork 的 mesa 依赖它）---"
-	apt-cache policy mali-g610-firmware 2>/dev/null | sed 's/^/    /'
-	apt-get install -s mali-g610-firmware 2>&1 | tail -8 | sed 's/^/    /'
+	if is_csf; then
+		echo
+		echo "  --- mali-g610-firmware（CSF 机型需要；PPA 提供，panfork 的 mesa 声明依赖）---"
+		apt-cache policy mali-g610-firmware 2>/dev/null | sed 's/^/    /'
+		echo "  预演（apt-get install -s，不落盘）："
+		apt-get install -s mali-g610-firmware 2>&1 | tail -8 | sed 's/^/    /'
+
+		echo
+		echo "  --- 固件归属（判断是否与 mali-g610-firmware 抢同一个文件）---"
+		ls -l /lib/firmware/mali_csffw.bin 2>&1 | sed 's/^/    /'
+		dpkg -S /lib/firmware/mali_csffw.bin 2>&1 | sed 's/^/    /'
+		echo "    若报 trying to overwrite /lib/firmware/mali_csffw.bin："
+		echo "      sudo dpkg -i --force-overwrite /var/cache/apt/archives/mali-g610-firmware*.deb"
+	else
+		echo
+		echo "  --- mali-g610-firmware：本板【不需要】（arch=$(gpu_arch)，Bifrost/JM，无 CSF 固件环节）---"
+		echo "    它只是 panfork mesa 包里的 dpkg Depends，apt 仍会顺带装上，但对 JM 完全惰性；"
+		echo "    本板 /lib/firmware/mali_csffw.bin 不存在，也不会出现覆盖厂商固件的冲突。"
+		echo "    （若真装上了：systemctl disable + mask set-mali-firmware.service，否则它每次开机"
+		echo "      都会 rm -f 该路径再建错版软链 —— 镜像构建侧已有同样处理）"
+	fi
 
 	echo
-	echo "  --- 板上现有 libmali / 固件归属（判断是否与 mali-g610-firmware 抢文件）---"
-	dpkg -l 2>/dev/null | grep -i mali | sed 's/^/    /'
-	ls -l /lib/firmware/mali_csffw.bin 2>&1 | sed 's/^/    /'
-	dpkg -S /lib/firmware/mali_csffw.bin 2>&1 | sed 's/^/    /'
+	echo "  --- 板上现有 libmali 包（回滚/路线切换时要用到真实包名）---"
+	dpkg -l 2>/dev/null | awk '/^ii/ && $2 ~ /^libmali/ {printf "    %s %s\n", $2, $3}'
 
 	say "结论与下一步"
-	cat <<'TIP'
-  实测结论（本板）：mali-g610-firmware 装得干净（dry-run: 0 upgraded, 1 newly installed），
-  之前那句 "not going to be installed" 只是 libllvm14 让整个求解失败后的连带报错。
-  所以真障碍只有一个：libllvm14。
-
-  → sudo bash $0 --fix-llvm    # 从 jammy ports 临时取 libllvm14（低优先级 pin + 装完删源）
-  → sudo bash $0 --install     # 再装 panfork
-  → sudo systemctl restart lightdm && sudo bash $0 --check
-
-  若真实安装时 dpkg 报固件文件被占用（trying to overwrite /lib/firmware/mali_csffw.bin）：
-      sudo dpkg -i --force-overwrite /var/cache/apt/archives/mali-g610-firmware*.deb
-  若想彻底避免这一层：卸掉厂商包，route C 改用 PPA 的 libmali-g610-x11 + libdri2to3 + malirun
-      sudo apt purge -y libmali-valhall-g610-g24p0-x11-gbm
-TIP
+	if [[ -z "$c14" || "$c14" == "(none)" ]]; then
+		echo "  真障碍：libllvm14（panfork 的 mesa 是 jammy 期构建，Depends 里点名要它）"
+		echo "  → sudo bash $0 --fix-llvm    # 从 jammy ports 临时取（pin 100 + 装完删源）"
+	else
+		ok "依赖齐了，可直接安装"
+	fi
+	echo "  → sudo bash $0 --install                   # 定向降级 mesa（先 dry-run 再确认）"
+	echo "  → sudo systemctl restart lightdm"
+	echo "  → sudo bash $0 --check                     # 判定：renderer 必须是 Mali-* 而不是 llvmpipe"
+	if is_bifrost; then
+		echo
+		warn "本板是 JM 架构：--check 之后务必再跑桌面 GL 压测（glmark2，不是 glmark2-es2）"
+		echo "      个位数帧率 / dmesg 刷 syncobj 超时 = JM 路径已知故障，直接 --rollback"
+	fi
 }
 
 # ── 2.6 补 libllvm14（panfork mesa 唯一的真障碍）────────────────────────────
@@ -328,7 +379,9 @@ install_mesa() {
 	echo "$preview" | grep -E '^(Inst|Remv|E:)' | sed 's/^/    /' | head -40
 	hlist="$(echo "$preview" | awk '/^Inst /{print $2}' | tr '\n' ' ')"
 	echo
-	warn "此举会把 Kali 的 Mesa 26 换成 panfork 的 23.x，且可能连带降级依赖包（见上面预演）。"
+	local cur
+	cur="$(dpkg-query -W -f='${Version}' libgl1-mesa-dri 2>/dev/null)"
+	warn "此举会把当前的 Mesa（${cur:-未安装}）换成 panfork 的 23.x，且可能连带降级依赖包（见上面预演）。"
 	confirm "继续？" || { echo "  已取消"; exit 0; }
 
 	apt-get install -y --allow-downgrades $MESA_PKGS || die "安装失败，见上方 apt 输出"
@@ -346,7 +399,7 @@ install_mesa() {
 			pv="$(dpkg-query -W -f='${Version}' "$p" 2>/dev/null)"
 			case "$pv" in
 				*panfork*) warn "hold（已被连带降级到 panfork 版，非计划内）: $p $pv" ;;
-				*)         echo "  hold（保持 26.x 不动）: $p" ;;
+				*)         echo "  hold（保持当前版本不动）: $p" ;;
 			esac
 		fi
 	done
@@ -356,14 +409,79 @@ install_mesa() {
 	echo "  origin 核对（应出现 LP-PPA-liujianfeng1994-panfork-mesa）:"
 	apt-cache policy $MESA_PKGS 2>/dev/null | grep -E '^[a-z]|Installed|Candidate|origin|LP-PPA' | sed 's/^/    /'
 	echo
+	say "装完先做冒烟测试（先别急着重启 X）"
+	panfrost_smoke
+	local sv; sv="$(smoke_verdict)"
+	echo "  rc=$SMOKE_RC → $sv"
+	if [[ "$sv" == "crash" ]]; then
+		bad "panfrost 在本机 kbase 上直接崩溃（SIGABRT）—— 现在重启 lightdm 必定黑屏"
+		smoke_detail
+		warn "建议立刻回滚：sudo bash $0 --rollback  然后 systemctl restart lightdm"
+		if confirm "现在就回滚？"; then
+			ASSUME_YES=1 rollback
+		fi
+		return
+	elif [[ "$sv" != "ok" ]]; then
+		warn "冒烟测试没拿到 Mali 渲染器；重启 X 后大概率还是 llvmpipe"
+		smoke_detail
+	fi
+	echo
 	warn "下一步：重启 X 让新驱动生效（已在跑的进程不会换驱动）"
 	echo "    sudo systemctl restart lightdm    # 桌面起不来就 systemctl isolate multi-user.target"
 	echo "  然后：sudo bash $0 --check"
 }
 
+# ── 3.5 驱动冒烟测试（不需要 X / 不需要桌面）───────────────────────────────
+# 为什么必须先做这一步：panfork 与内核 kbase 的 UAPI 不匹配时，会在
+# KBASE_IOCTL_MEM_JIT_INIT 处失败，紧接着驱动自己 double free → SIGABRT，
+# 而 Xorg 只会留下 "Caught signal 6 (Aborted)"，然后 lightdm start-limit-hit，
+# 表现就是"装完重启后黑屏、SSH 还在"。等 X 起来再查就已经晚了。
+# 这个测试直接让 mesa 起一个 surfaceless 的 panfrost 上下文，几秒钟就能判死。
+SMOKE_RC=""; SMOKE_OUT=""
+panfrost_smoke() {
+	if ! command -v eglinfo >/dev/null 2>&1; then
+		SMOKE_RC=127; SMOKE_OUT="缺 eglinfo（apt install mesa-utils-extra）"; return 127
+	fi
+	SMOKE_OUT="$(EGL_PLATFORM=surfaceless GALLIUM_DRIVER=panfrost timeout 25 eglinfo -B 2>&1)"
+	SMOKE_RC=$?
+	return $SMOKE_RC
+}
+# 输出 ok | crash | nomali
+smoke_verdict() {
+	case "$SMOKE_RC" in
+		134|139|124) echo crash; return ;;
+	esac
+	echo "$SMOKE_OUT" | grep -qiE 'double free|Aborted|Assertion .* failed' && { echo crash; return; }
+	echo "$SMOKE_OUT" | grep -qiE 'Mali' && { echo ok; return; }
+	echo nomali
+}
+smoke_detail() {
+	echo "$SMOKE_OUT" | grep -iE 'KBASE_IOCTL|kbase|double free|Aborted|Assertion|Mali|renderer|unsupported' | head -6 | sed 's/^/      /'
+}
+
 # ── 4 go/no-go ─────────────────────────────────────────────────────────────
 check() {
 	say "④ go/no-go 判定"
+	# 先做与 X 无关的冒烟测试：它能在"桌面已经起不来"的情况下照样判定，
+	# 避免出现"X 挂着 → glxinfo 拿不到 → 无法判定"的死局（本板踩过）。
+	panfrost_smoke
+	local sv; sv="$(smoke_verdict)"
+	echo "  冒烟测试（surfaceless EGL + GALLIUM_DRIVER=panfrost）：rc=$SMOKE_RC → $sv"
+	if [[ "$sv" == "crash" ]]; then
+		bad "NO-GO —— panfrost 驱动在本机 kbase 上直接崩溃（SIGABRT）"
+		smoke_detail
+		echo "  典型成因：panfork 的 pan_base UAPI 与内核 kbase DDK 不匹配"
+		echo "           （本机 dmesg: $(dmesg 2>/dev/null | grep -i 'Kernel DDK version' | tail -1 | sed 's/.*] //')）"
+		echo "  这不是配置问题，改 /etc 也救不回来："
+		echo "    → sudo bash $0 --rollback    # 回到官方 mesa，桌面恢复"
+		echo "    → 想用 GPU 就走 libmali 的 GLES/EGL（LD_LIBRARY_PATH=.../mali）"
+		return
+	fi
+	if [[ "$sv" == "nomali" ]]; then
+		warn "冒烟测试没拿到 Mali 渲染器（驱动没接上，但没崩）"
+		smoke_detail
+	fi
+
 	# X 凭据必须先解析对，否则 glxinfo 取不到会被误判成"panfork 没生效"
 	if [[ -z "$DISPLAY" ]]; then
 		warn "无 DISPLAY：请在本机桌面会话里跑，或先 export DISPLAY=:0"
@@ -394,8 +512,14 @@ check() {
 		for _l in libGL.so.1 libEGL.so.1 libGLESv2.so.2; do
 			printf "    %-16s -> %s\n" "$_l" "$(ldconfig -p 2>/dev/null | awk -v L="$_l" '$1==L{print $NF;exit}')"
 		done
+		if is_bifrost; then
+			echo
+			warn "本板是 Bifrost/JM：'能起来' 不等于 '能用'。必须再做桌面 GL 压测："
+			echo "    DISPLAY=${DISPLAY:-:0} glmark2 --size 800x600      # 期望 >200"
+			echo "    个位数帧率 / dmesg 出现 syncobj timeout、'Atom .. reported event 0x58' = JM 路径已知故障"
+		fi
 		echo "  完整验证（推荐）：sudo bash $0 --verify   # 压测 + X 存活 + OpenCL 共存"
-		command -v glmark2-es2 >/dev/null 2>&1 || echo "  未装：apt install glmark2-es2"
+		command -v glmark2-es2 >/dev/null 2>&1 || echo "  未装：apt install glmark2-es2 glmark2"
 		echo "  与 libmali 共存自检：sudo bash libmali-verify.sh --nodisp   （应仍能看到 Mali）"
 	elif [[ "$ddk_bad" == "1" ]]; then
 		bad "NO-GO（DDK 不兼容）—— panfork(旧 DDK 用户态) 与内核 kbase 对不上"
@@ -651,27 +775,62 @@ collect() {
 rollback() {
 	say "⑥ 回滚到 Kali 官方 mesa"
 	collect
-	warn "将删除 PPA 源/公钥/pin，并把 mesa 装回 Kali 源的版本。"
+	warn "将删除 PPA 源/公钥/pin、卸掉 PPA 独有包，并把 mesa 家族装回官方源的版本。"
 	confirm "继续？" || { echo "  已取消"; exit 0; }
 
-	apt-mark unhold $MESA_PKGS $PROTECT_PKGS 2>/dev/null
+	apt-mark unhold $MESA_PKGS $PROTECT_PKGS libglapi-mesa mali-g610-firmware 2>/dev/null
 	rm -f "$SRC" "$KEYGPG" "$KEYASC" "$PIN"
 	ok "已删除 $SRC / 公钥 / pin"
 	apt-get update 2>&1 | tail -3 | sed 's/^/    /'
-	# 只装回"Kali 源里确实有候选"的包（如 libglapi-mesa 在 Kali 里不存在，跳过即可）
-	local av=()
-	local p
+
+	# ⚠ 这里必须显式给版本号。PPA 的包带 epoch（1:23.0.5），按版本比较它比 Kali 的
+	# 26.1.6 更"新"，所以 `apt-get install --allow-downgrades <包名>` 只会打印
+	# "is already the newest version" 然后【什么都不做】—— 回滚假成功，X 依旧崩。
+	# 实测踩过。正确做法：从官方源（非 panfork）取版本号，写成 pkg=ver。
+	local spec=() p ver
 	for p in $MESA_PKGS; do
-		if apt-cache policy "$p" 2>/dev/null | grep -qE 'Candidate: \(none\)'; then
-			echo "  跳过（Kali 源无此包）: $p"
+		ver="$(apt-cache madison "$p" 2>/dev/null | awk -F'|' '
+			{ v=$2; r=$3; gsub(/^[ \t]+|[ \t]+$/,"",v); gsub(/^[ \t]+|[ \t]+$/,"",r);
+			  if (r !~ /panfork/) { print v; exit } }')"
+		if [[ -n "$ver" ]]; then
+			spec+=("$p=$ver")
 		else
-			av+=("$p")
+			echo "  跳过（官方源无此包）: $p"
 		fi
 	done
-	apt-get install -y --allow-downgrades "${av[@]}" || warn "装回失败，检查上方 apt 输出"
+	if [[ ${#spec[@]} -gt 0 ]]; then
+		echo "  将安装: ${spec[*]}"
+		apt-get install -y --allow-downgrades --allow-change-held-packages "${spec[@]}" \
+			|| warn "装回失败，检查上方 apt 输出"
+	fi
+
+	# 只在 PPA 里存在的包，官方源没有，留着只会拖住 mesa 的依赖
+	local extra=()
+	for p in libglapi-mesa mali-g610-firmware; do
+		dpkg -s "$p" >/dev/null 2>&1 && extra+=("$p")
+	done
+	if [[ ${#extra[@]} -gt 0 ]]; then
+		apt-get purge -y --allow-change-held-packages "${extra[@]}" 2>&1 | tail -4 | sed 's/^/    /'
+	fi
+
+	# mali-g610-firmware 的 postinst 会 enable set-mali-firmware.service，并在
+	# /lib/firmware/mali_csffw.bin 造一条错版（g1xp0）软链 —— 一并清掉
+	if [[ -f /usr/lib/systemd/system/set-mali-firmware.service ]]; then
+		systemctl disable --now set-mali-firmware.service >/dev/null 2>&1 || true
+		systemctl mask set-mali-firmware.service >/dev/null 2>&1 || true
+		echo "  已 disable + mask set-mali-firmware.service"
+	fi
+	if [[ -L /lib/firmware/mali_csffw.bin ]]; then
+		rm -f /lib/firmware/mali_csffw.bin
+		echo "  已删残留固件软链 /lib/firmware/mali_csffw.bin"
+	fi
+	ldconfig
+
 	echo
 	mesa_versions
-	ok "回滚完成，建议 reboot 后核对：glxinfo -B 应回到 llvmpipe（即改动前状态）"
+	ok "回滚完成"
+	echo "  还需要：sudo systemctl restart lightdm   （X 才会换回官方 mesa）"
+	echo "  核对：glxinfo -B 的 renderer 应回到 llvmpipe"
 }
 
 case "$DO" in

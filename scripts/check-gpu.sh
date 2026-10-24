@@ -249,9 +249,23 @@ if ls "$LIBA"/libmali*.so* >/dev/null 2>&1; then
 		_kernver="$(dmesg 2>/dev/null | grep -i 'Kernel DDK version' | tail -1 | grep -oE 'g[0-9]{1,3}p[0-9]+' | head -1)"
 		[[ -n "$_blobver" ]] && echo "    用户态 blob 版本标记: $_blobver"
 		[[ -n "$_kernver" ]] && echo "    内核 kbase DDK 版本:  $_kernver"
-		if [[ -n "$_blobver" && -n "$_kernver" && "$_blobver" != "$_kernver" ]]; then
-			warn "两者不一致（用户态 $_blobver vs 内核 $_kernver）：kbase 的用户态通常要与内核 DDK 版本匹配，"\
-"否则 EGL 初始化会失败。这是闭源 libmali 路线的【首要】风险点"
+		# 版本方向判定（Rockchip 官方口径）：DDK 可以高于 mali-so，反之不允许。
+		# 不能拿拼接数字比 —— g9p0 会被错判成大于 g15p0，必须先比 g 后的数字、再比 p。
+		ver_gt() {	# $1 > $2 ?
+			local a="${1#g}" b="${2#g}"
+			local amaj="${a%%p*}" amin="${a#*p}"
+			local bmaj="${b%%p*}" bmin="${b#*p}"
+			(( amaj > bmaj )) && return 0
+			(( amaj < bmaj )) && return 1
+			(( amin > bmin ))
+		}
+		if [[ -n "$_blobver" && -n "$_kernver" ]]; then
+			if ver_gt "$_blobver" "$_kernver"; then
+				warn "用户态 $_blobver 比内核 DDK $_kernver 新 —— 官方不允许这种组合（DDK 可高于 mali-so，"\
+"反之不行），EGL 初始化大概率失败"
+			elif [[ "$_blobver" != "$_kernver" ]]; then
+				ok "版本方向正确（用户态 $_blobver ≤ 内核 DDK $_kernver）：按 Rockchip 口径可用，无需强求完全相等"
+			fi
 		fi
 	else
 		bad "只有 libmali-hook 没有 libmali 实体库 —— 装了一半，EGL/GLES 仍归 Mesa"
