@@ -633,6 +633,13 @@ cp ${overlay_dir}/etc/rc.local ${chroot_dir}/etc/rc.local
 # Default adduser config
 cp ${overlay_dir}/etc/adduser.conf ${chroot_dir}/etc/adduser.conf
 
+# Xorg：把 modesetting 钉在 display-subsystem 的 KMS 设备上
+# 背景：rk3576/rk3588 的 rknpu 也会注册一张 DRM 卡，Xorg 找不到 primary 时会
+# 退回第一张（NPU），modesetting 驱动不了 → 退 fbdev → lightdm 反复重启。
+# 见 overlay 里该文件的注释。
+mkdir -p ${chroot_dir}/etc/X11/xorg.conf.d
+cp ${overlay_dir}/etc/X11/xorg.conf.d/20-rockchip-display.conf ${chroot_dir}/etc/X11/xorg.conf.d/20-rockchip-display.conf
+
 mkdir -p ${chroot_dir}/etc/initramfs/post-update.d/
 cp ${overlay_dir}/etc/initramfs/post-update.d/zz-update-firmware ${chroot_dir}/etc/initramfs/post-update.d/zz-update-firmware
 

@@ -72,7 +72,10 @@ Docker 方案的设计细节、`--privileged` 的逐项原因、与裸机流程�
 |---|---|---|
 | 第一次开机进桌面后又自动重启 | **设计行为**：扩容 p3 + 应用新 DTB 后 `--no-block reboot` | 不用处理，第二次启动正常 |
 | 第二次开机卡在登录界面之前 | 内核 / modules / DTB 不同源，或某个 systemd 单元卡住 | 串口看 `[boot_init]` 与最后停在哪个单元；确认 `boot.img` 与 `linux-image.deb` 是**同一次内核编译** |
-| HDMI 黑屏，串口一直刷 `dwhdmi-rockchip ... use tmds mode` | X 崩溃 → lightdm 反复重启（每次重启重新 modeset HDMI） | 多为 libmali 的全局库注入导致，见 [packages/gpu/README.md](../packages/gpu/README.md) |
+| HDMI 黑屏，串口一直刷 `dwhdmi-rockchip ... use tmds mode` | X 崩溃 → lightdm 反复重启（每次重启重新 modeset HDMI） | 先看 `/var/log/Xorg.0.log` 的 `(EE)`：<br>• 报 `GLSL compile failure` / `GL_EXT_blend_func_extended` → libmali 的全局库注入没摘干净，见 [packages/gpu/README.md](../packages/gpu/README.md)<br>• 报 `Cannot run in framebuffer mode` → 见下一行 |
+| `lightdm` 起不来（`start-limit-hit`），Xorg 报 `Cannot run in framebuffer mode. Please specify busIDs` | rk3576/rk3588 的 **rknpu 也注册了一张 DRM 卡**（`/sys/devices/platform/27700000.npu/drm/cardN`）。Xorg 找不到 primary 平台设备时会退回第一张，modesetting 驱动不了 NPU 那张 → 退到 fbdev → fatal | 镜像已带 `etc/X11/xorg.conf.d/20-rockchip-display.conf` 把 modesetting 钉在 `display-subsystem` 上。旧镜像手工放进同一路径后 `systemctl restart lightdm`；自检：`grep "using /dev/dri" /var/log/Xorg.0.log` 应指向 `platform-display-subsystem-card` |
+| 桌面能起但非常卡（`glamor initialization failed` / `Refusing to try glamor on llvmpipe`） | `GPU_STACK=libmali` 或 `none` 的镜像没有可用的硬件 GL：libmali 不提供 GLX 且缺 `GL_EXT_blend_func_extended`，Debian 的 xserver 又拒绝用 llvmpipe 跑 glamor | 这是预期行为。要桌面硬件加速用 `GPU_STACK=both`（panfork 负责 X11/glamor，libmali 负责 GLES/OpenCL/Vulkan） |
+| 装了 panfork、重启 lightdm 后直接黑屏，Xorg 日志 `Caught signal 6 (Aborted)` | **panfork 的 pan_base UAPI 与内核 kbase DDK 不匹配**：`ioctl(KBASE_IOCTL_MEM_JIT_INIT): Cannot allocate memory` → 驱动 `double free` → abort。Bifrost/JM（rk3576 G52）上实测必现；rk3588 的 CSF/Valhall 路径不受影响 | `sudo bash panfork-verify.sh --rollback` 后 `systemctl restart lightdm`。**回滚必须显式给版本号**（PPA 带 epoch，apt 认为 panfork 版"更新"，`--allow-downgrades` 也会静默跳过）。G52 上就别折腾 panfork 了，GPU 走 libmali 的 GLES/EGL |
 | 没有 WiFi / 蓝牙 | `/usr/lib/firmware` 被多嵌了一层（`firmware/firmware/aic8800/...`） | 检查镜像里有没有 `/usr/lib/firmware/firmware`；旧版本构建问题，重建即可 |
 | 根分区没扩到整块 eMMC | `growpart` 失败，或 `/boot/boot_dilatation_init` 被误建 | 删掉该标记后重启；或手动 `growpart /dev/mmcblk0 3 && resize2fs /dev/mmcblk0p3` |
 | 登录后没有网络 | NetworkManager 未托管 / 未配置 | `nmcli device status`；`nmtui` 配置 |
