@@ -357,9 +357,11 @@ sudo dd if=build/rootfs.img of=/dev/mmcblk0pX bs=1M status=progress conv=fsync
 
 ## 七、注意事项与已知差异
 
-### 7.1 README 的依赖清单不能照抄
+### 7.1 依赖清单以 Dockerfile 为准（历史坑）
 
-项目根的 `README.md` 列了 `python2`，但 **kali-rolling 早已移除该包**，照抄会让 `apt-get install` 直接失败。Dockerfile 里的依赖清单是从「两个脚本实际调用了什么」反推的，已剔除失效项。
+早期项目根的 `README.md` 列过 `python2`，但 **kali-rolling 早已移除该包**，照抄会让 `apt-get install` 直接失败。
+Dockerfile 里的依赖清单是从「两个脚本实际调用了什么」反推的，已剔除失效项；裸机依赖清单同样修正过，
+见 [`docs/native-build.md`](../../docs/native-build.md)。
 
 ### 7.2 首次构建耗时
 
@@ -377,7 +379,7 @@ sudo dd if=build/rootfs.img of=/dev/mmcblk0pX bs=1M status=progress conv=fsync
 
 > 为什么镜像构建期不直接用 `http.kali.org`：它是 GeoIP 重定向，国内可能被分到
 > 清华/东软等镜像，存在整段 IP 被 403 屏蔽、或镜像站 DNS 解析失败的情况，
-> 会直接导致 `docker build` 失败（真实案例见根 README 2.9）。
+> 会直接导致 `docker build` 失败（真实案例见 [`docs/troubleshooting.md`](../../docs/troubleshooting.md#2-构建-rootfs裸机--docker-公共)）。
 > 阿里云源对国内稳定；CI 传 build-arg 切回官方源即可，两边各用最快的。
 >
 > **★ 换源时必须连 deb822 文件一起处理**：Kali 2026.2 起 APT 源放在

@@ -1,307 +1,201 @@
-## 0.构建说明
-这是一个可以构建kali-rootfs的仓库，适用于rk系列的芯片，要求主机是kali linux系统。
-编译内核时要编译出一个deb包，因为`/overlay/usr/local/linux-image.deb`需要替换成实际的内核deb包，仓库里的是6.1.99的内核，对应的内核地址：https://github.com/LubanCat/kernel
-构建方式有两种，任选其一：
+# Kali Linux rootfs（LubanCat / RK3588 · RK3576）
 
-| 方式 | 需要的环境 | 说明 |
+用 `debootstrap` 构建一套 Kali Linux arm64 rootfs，最终打包成 **RKDevTool 可直接烧录的 `update.img`**。
+
+```
+scripts/build-rootfs.sh  →  build/rootfs/      rootfs 目录树（约 5~10 GB）
+build/mk-image.sh        →  build/rootfs.img   ext4 根分区镜像
+build/mk-updateimg.sh    →  build/update.img   整包（loader + uboot + boot + rootfs）
+```
+
+---
+
+## 0. 开始之前：确认两样输入
+
+| 需要准备 | 放到哪里 | 说明 |
 |---|---|---|
-| **裸机** | kali linux + 手工装 20 多个依赖 | 见第 1 节 |
-| **Docker**（推荐） | 任意装了 docker 的机器 | 见第 2 节 |
+| **内核 deb** | `overlay/usr/local/linux-image.deb` | 仓库自带一份 `6.1.99-rk3588`。**换内核或换 SoC 必须替换**，否则镜像里 `/lib/modules` 是空的，`modprobe` 全挂 |
+| **Bootloader 三件套** | `build/firmware/` | `MiniLoaderAll.bin`、`uboot.img`、`boot.img`。仓库**不含**（体积大且与板卡绑定），从 SDK 编译后拷进来 |
 
-### 关于gpu
-GPU 用户态驱动栈目前适配 **rk3588**（Mali-G610 / Valhall）与 **rk3576**（Mali-G52 / Bifrost）
-两种 SoC；其他 RK 芯片的板卡请把 `GPU_STACK` 设为 `none`，具体可选参数可以查阅 2.7 章节。 
+两者的获取方式、以及"boot.img 与内核 deb 必须同一次编译"这条硬约束，见
+[build/firmware/README.md](build/firmware/README.md)。
 
-## 1.用法（裸机）
-### 1.1 安装依赖
-```
-sudo apt-get install -y build-essential gcc-aarch64-linux-gnu bison \
-qemu-user-static qemu-system-arm u-boot-tools binfmt-support \
-debootstrap flex libssl-dev bc rsync kmod cpio xz-utils fakeroot parted \
-udev dosfstools uuid-runtime git-lfs device-tree-compiler python3 fdisk \
-python-is-python3 python2
-```
-### 1.2 编译
-执行仓库里`scripts/build-rootfs.sh`这个脚本，然后用`build/mk-image.sh`脚本打包成img镜像，就是rootfs分区镜像。
+> **RK3576 说明**：首启的板卡识别表（`boot_init.sh` 的 `board_info()`）已覆盖 LubanCat 全系
+> —— rk3128 / rk3528 / rk3562 / rk3566·rk3568 / rk3576 / rk3588·rk3588s。
+> 万一遇到表里没有的 SoC，首启不会中断，会沿用 `boot.img` 自带的那份 dtb/uEnv —— 见
+> [docs/native-build.md §5](docs/native-build.md#5-换内核--换-soc--换源)。
 
-### 1.3 打包镜像
-`build/firmware`文件夹里的md文档有说明，需要自行准备这三个文件；编译好rootfs分区镜像后执行`mk-updateimg.sh rk356x|rk3576|rk3588`，就可以打包成可以用rkdevtool烧录的镜像。
+**主机要求**：Linux（x86_64 或 arm64；WSL2 可用，Windows 的 Git Bash 不可用）、
+可用磁盘 **≥ 20 GB**、宿主内核 **≥ 5.10**（推荐 ≥ 5.14）。
 
-## 2.用Docker构建（推荐）
+---
 
-裸机流程要求宿主机是 kali linux 且手工装一堆依赖。本仓库提供一个 Dockerfile 把这件事收敛成一条命令。
+## 1. 构建 rootfs
 
-**构建流程**： 构建仍然由仓库里既有的两个脚本完成：
+两种方式任选其一，产物相同。首次全量构建约 **40~90 分钟**（取决于网络与宿主架构），
+打包 `rootfs.img` 再花 5~15 分钟。
 
-```
-scripts/build-rootfs.sh   ->   build/rootfs/        # rootfs 目录树
-build/mk-image.sh         ->   build/rootfs.img     # 最终产物
-```
-
-容器只是提供一个「能跑这两个脚本的环境」，并替你按正确顺序调用它们。
-仓库根通过 `-v` 挂载进容器，所以产物直接落在宿主机的 `build/`，不经过 docker daemon，也不需要 `docker cp`。
-
-```
-宿主机                                     容器
-──────────────────────────────────────────────────────────────────────
-<repo>/  ──── (-v 挂载) ────▶  /work/kali-rootfs    ← Dockerfile 的 WORKDIR
-                                 └─ ENTRYPOINT: entrypoint.sh
-                                      ├─ scripts/build-rootfs.sh → <repo>/build/rootfs/
-                                      └─ build/mk-image.sh       → <repo>/build/rootfs.img
-                                         （直接写回宿主机，零拷贝，不需要 docker cp）
-```
-
-### 2.1 环境要求
-
-1. **Docker**（23.0+；更老的版本先 `export DOCKER_BUILDKIT=1`，因为 `docker build --platform` 依赖 BuildKit）
-2. **20GB 以上可用磁盘**：rootfs 目录树 5~10GB，`mkfs.ext4 -d` 期间 img 与目录树并存 5~8GB，另有 2GB swapfile 和 apt 缓存
-3. **shell 环境**：在 Linux / macOS / **WSL2** 的 bash 里执行。Windows 的 Git Bash 直接跑会因为 `F:\...` 路径转换失败，请先进入 WSL2
-4. **宿主内核 ≥ 5.10**（推荐 ≥ 5.14）：Kali-rolling 的 systemd 260+ 把内核基线提到 5.10，低于基线时 chroot 内 apt/dpkg 会大面积失败、构建无法完成；5.10~5.13 仅提示仍可继续。用 `uname -r` 自查
-
-### 2.2 Dockerfile 里有什么
-
-| 项 | 内容 |
-|---|---|
-| 基础镜像 | `kalilinux/kali-rolling` |
-| APT 源 | 默认阿里云（`--build-arg APT_MIRROR=...` 可覆盖）。写入 deb822 格式的 `/etc/apt/sources.list.d/kali.sources`，并**先清掉基础镜像自带的同名文件**，规避 `http.kali.org` GeoIP 分流到不可用镜像的问题 |
-| 安装的依赖 | `debootstrap`、`e2fsprogs`、`sudo`、`mount`/`findmnt`、交叉编译工具链、`qemu-user`（**仅 x86_64**）等，完整清单和逐项用途见 `Dockerfile` 内的注释 |
-| `ENTRYPOINT` | `/usr/local/bin/entrypoint.sh` |
-| `WORKDIR` | `/work/kali-rootfs` —— 约定的仓库挂载点，`-v` 必须挂到这里 |
-| 镜像体积 | arm64 不装 qemu，比 x86_64 小约 60MB |
-
-`entrypoint.sh` 的内容，他**不含构建逻辑**：
-
-1. 环境自检（root / 仓库是否挂上 / qemu binfmt / 磁盘空间）
-2. 调用 `scripts/build-rootfs.sh` 生成 `build/rootfs/`
-3. 容器适配清理：卸载 rootfs 内的残留挂载点（残留会把宿主 `/dev` 灌进 img）、删除构建期专用的 `qemu-aarch64-static`
-4. 调用 `build/mk-image.sh` 打包出 `build/rootfs.img`
-
-### 2.3 用法一：一键脚本（推荐）
+### 方式一：Docker（推荐，环境零配置）
 
 ```bash
-bash build/docker/build.sh
-```
-
-这一条命令内部就是 2.4 的两步（`docker build` + `docker run`），参数已经配好，跑完产物在宿主机 `build/` 下。
-`PLATFORM` 按宿主架构自动推导，无需设置。
-
-### 2.4 用法二：手动使用 Dockerfile
-
-要自定义参数、或者想自己控制每一步时，直接对 Dockerfile 操作即可 —— 就两步。
-
-**第 1 步，构建镜像**（在**仓库根**执行；`.` 是构建上下文，`.dockerignore` 已排除 `build/rootfs/` 和 `build/*.img` 等大文件）
-
-```bash
-docker build -t kali-rootfs-builder .
-```
-
-不写 `--platform` 时默认按宿主架构构建，通常就是你要的。要显式指定也可以加：x86_64 宿主用 `--platform linux/amd64`，arm64 宿主用 `--platform linux/arm64`。
-镜像架构必须和宿主机一致，否则运行时会退化成模拟（见 2.5）。
-
-**第 2 步，运行容器**
-
-```bash
-docker run --rm -it --privileged \
-  -v "$PWD":/work/kali-rootfs \
-  -w /work/kali-rootfs \
-  -e BOARD=lubancat-4 \
-  kali-rootfs-builder
-```
-
-每个参数为什么这么写：
-
-| 参数 | 作用 |
-|---|---|
-| `--rm` | 跑完自动删除容器（产物在宿主机，容器不需要留） |
-| `-v "$PWD":/work/kali-rootfs` | 把仓库根挂进容器。**必须在仓库根目录执行**；路径要和 Dockerfile 的 `WORKDIR` 一致 |
-| `-w /work/kali-rootfs` | 容器内工作目录 |
-| `-e BOARD=lubancat-4` | 目标板卡，默认 `lubancat-4` |
-| `-e FORCE_REBUILD=1` | 可选。`build/rootfs.img` 已存在时默认跳过构建，加这个强制全量重建 |
-| `--privileged` | 必需。脚本要在 chroot 内 `mount -t proc/sysfs`、`mount -o bind /dev`、`mknod`，缺 cap 会报 `Permission denied`（详细分析见 `build/docker/README.md`） |
-| 末尾不写命令 | 自动执行 `ENTRYPOINT`，即 entrypoint.sh 全流程 |
-
-**第 3 步，取产物** —— 产物已经在宿主机上了，不需要 `docker cp`：
-
-```
-build/rootfs/        # rootfs 目录树
-build/rootfs.img     # 可直接 dd 的 ext4 根分区镜像
-```
-
-> 想收紧权限（共享机器不加 `--privileged`）时，把 `--privileged` 换成：
-> `--cap-add SYS_ADMIN --cap-add SYS_CHROOT --cap-add MKNOD --cap-add DAC_OVERRIDE --cap-add FOWNER --security-opt seccomp=unconfined --security-opt apparmor=unconfined`
-
-### 2.5 按宿主机架构选择参数
-
-两条路径的区别只剩一处：**要不要注册 binfmt**。
-
-关于 `--platform`，**两种用法都不用操心**：
-
-- **手动方式**：`docker build` 不写 `--platform` 时默认就按宿主架构构建，x86_64 和 arm64 都可以省略。
-- **一键脚本**：`build/docker/build.sh` 会按 `uname -m` 自动推导（`aarch64/arm64 → linux/arm64`，其余 → `linux/amd64`），并打印实际使用的平台。特殊需求仍可手动覆盖：`PLATFORM=linux/amd64 bash build/docker/build.sh`。
-
-| 宿主机 | 需先注册 qemu binfmt？ | 容器内走哪条路 | 参考耗时 |
-|---|---|---|---|
-| x86_64 | **需要**（见下） | `debootstrap --foreign` + chroot 第二阶段（qemu 模拟 arm64） | 90~180 分钟 |
-| arm64 | 不需要 | 原生 `debootstrap` | 40~90 分钟 |
-
-#### x86_64 宿主机：先注册 binfmt
-
-rootfs 是 arm64，而容器是 x86_64，debootstrap 第二阶段要在 chroot 内执行 arm64 的 `apt`/`dpkg`，靠 qemu 用户态模拟。所以：
-
-```bash
-# 在宿主机上注册（不是容器内）
+# x86_64 宿主机先注册一次 binfmt（arm64 宿主跳过这步）
 docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
 
-# 验证：能看到 enabled，且 flags 里有 F
-cat /proc/sys/fs/binfmt_misc/qemu-aarch64
-```
-
-> `-p yes` 很关键：它给注册项加上 `F`(fix_binary) 标志 —— 内核在注册时就打开了 qemu 二进制，
-> 之后 chroot 内执行 arm64 不再依赖容器命名空间里能否找到 qemu 文件。
-
-然后正常执行 2.3 或 2.4 的步骤即可。
-
-<details>
-<summary>不想用官方镜像，改用系统包注册（永久生效）</summary>
-
-```bash
-sudo apt-get install -y qemu-user qemu-user-binfmt
-sudo systemctl restart systemd-binfmt
-# 或： sudo update-binfmts --enable qemu-aarch64
-```
-
-**包名有坑**：新版 Debian/Kali 已**删除 `qemu-user-static` 包**（Debian #1124747，2026-01）。
-老教程里的 `qemu-user-static binfmt-support` 虽然还能装上（被 `Provides:` 满足），
-但不再创建 `-static` 软链，导致 `build-rootfs.sh` 第 50 行的探测恒为假、静默走错分支。
-本方案的 Dockerfile 与 entrypoint 都会补建 `/usr/bin/qemu-aarch64-static → qemu-aarch64`，脚本零改动。
-
-</details>
-
-#### arm64 宿主机：什么都不用额外做
-
-arm64 上跑 arm64 是原生行为，不需要 qemu、不需要 binfmt，速度也最快。直接跑即可，`PLATFORM` 会自动推导成 `linux/arm64`：
-
-```bash
+# 构建
 bash build/docker/build.sh
 ```
 
-### 2.6 进容器看一眼（排查用）
+产物：`build/rootfs/` + `build/rootfs.img`（直接落在宿主机，不需要 `docker cp`）。
 
-想进容器手动跑脚本、而不是让 entrypoint 自动跑完，用 `--entrypoint bash` 覆盖入口：
+常用参数：
 
 ```bash
-docker run --rm -it --privileged \
-  -v "$PWD":/work/kali-rootfs \
-  -w /work/kali-rootfs \
-  --entrypoint bash \
-  kali-rootfs-builder
+BOARD=lubancat-5 bash build/docker/build.sh          # 换板卡（默认 lubancat-4）
+FORCE_REBUILD=1 bash build/docker/build.sh           # 忽略已有 rootfs.img，强制全量重建
+GPU_STACK=both bash build/docker/build.sh            # 预装 GPU 用户态驱动（见第 4 节）
 ```
 
-进去以后就能像在裸机上一样操作，例如：
+> 完整说明（前置条件、`--privileged` 的原因、手动 `docker build/run`、架构选择、耗时）：
+> [build/docker/README.md](build/docker/README.md)
+
+### 方式二：裸机（Debian 系发行版，Kali 已验证）
 
 ```bash
-bash scripts/build-rootfs.sh            # 只构建 rootfs 目录树
-cd build && bash mk-image.sh rootfs     # 只打包 img
+# 1) 依赖（x86_64 宿主要交叉构建 arm64，需要 qemu-user）
+sudo apt-get install -y debootstrap util-linux mount e2fsprogs sudo \
+  coreutils findutils tar gzip xz-utils zstd pigz \
+  build-essential gcc-aarch64-linux-gnu bison flex bc libssl-dev libncurses-dev \
+  u-boot-tools device-tree-compiler rsync kmod cpio fakeroot fakechroot \
+  parted fdisk dosfstools mtools udev uuid-runtime git git-lfs \
+  python3 python3-minimal python-is-python3 wget curl ca-certificates file procps
+
+# x86_64 宿主额外装 qemu，并补一条兼容软链（新版 Debian/Kali 不再提供 -static 后缀）
+sudo apt-get install -y qemu-user qemu-user-binfmt
+sudo ln -sf /usr/bin/qemu-aarch64 /usr/bin/qemu-aarch64-static
+
+# 2) 构建 rootfs 目录树（必须 root）
+sudo bash scripts/build-rootfs.sh
+
+# 3) 打包成 ext4 根分区镜像
+cd build && bash mk-image.sh rootfs
 ```
 
-### 2.7 build.sh 支持的环境变量
+> 注意：**不要**照抄老教程里的 `python2`（kali-rolling 已删该包，会直接装失败）；
+> 也别装 `qemu-user-static`（已被 Debian 删除，且不再创建 `-static` 软链）。
+> 依赖逐项用途、增量构建、换源、产物校验见 [docs/native-build.md](docs/native-build.md)。
+
+---
+
+## 2. 打包成 update.img
 
 ```bash
-# 换板卡（默认 lubancat-4；可选 lubancat-4 / lubancat-4io / lubancat-5 / lubancat-5io / lubancat-5-v2）
-BOARD=lubancat-5 bash build/docker/build.sh
+cd build
+bash mk-updateimg.sh rk3588 emmc      # 用法：mk-updateimg.sh <chip> <storage>
+```
 
-# 改了脚本后不用重建镜像（仓库是挂载的）
-REBUILD=0 bash build/docker/build.sh
+- `chip`：`rk3588` / `rk3576` / `rk356x`（**默认是 rk3576，一定要显式写对**）
+- `storage`：`emmc`（默认）/ `sd` / `spinor` / `sata` / `pcie`
 
-# 强制全量重建（默认 build/rootfs.img 已存在时会跳过构建）
-FORCE_REBUILD=1 bash build/docker/build.sh
+产物：`build/update.img`（中间目录会自动清理）。
 
-# CI / 无 TTY 环境
-INTERACTIVE=0 bash build/docker/build.sh
+> ⚠️ `tools/pack/` 里的 `afptool`、`rkImageMaker` 是 **x86_64 静态二进制**，
+> 所以**打包这一步要在 x86_64 主机上做**（arm64 主机需另配 qemu-x86_64）。
+> 分区布局、烧录细节、首启行为：见 [docs/pack-and-flash.md](docs/pack-and-flash.md)。
 
-# 跳过宿主内核版本预检（默认会拦掉 < 5.10 的内核；一般不要设）
-SKIP_KERNEL_CHECK=1 bash build/docker/build.sh
+---
 
-# 自定义镜像名
-IMAGE=my-builder bash build/docker/build.sh
+## 3. 烧录与首次开机
 
-# 预装 GPU 驱动栈（可选；默认 none，也可以写进 config/gpu-stack.conf 免得每次带）
-GPU_STACK=both bash build/docker/build.sh       # panfork + libmali 都装
-GPU_STACK=panfork bash build/docker/build.sh    # 只装 panfork（X11 桌面 GL 加速）
-GPU_STACK=libmali bash build/docker/build.sh    # 只装 Rockchip 闭源 libmali
+1. 打开 **RKDevTool** → `升级固件` → `固件` 选择 `build/update.img`
+2. 板卡进入 **Loader / Maskrom** 模式（按住 Recovery 上电，或短接 Maskrom）
+3. 点 `升级`，等待完成并自动重启
 
-# 目标 SoC（默认 rk3588）：决定用哪套 libmali、是否需要 CSF 固件
+**首次开机是两阶段**（正常现象，别以为卡死）：
+
+| 阶段 | 动作 |
+|---|---|
+| 第一次启动 | 按 ADC 识别板卡型号 → 选择对应 DTB/uEnv → 扩展 rootfs 分区到整块存储 → **自动重启一次** |
+| 第二次启动 | 直接进入登录界面 |
+
+默认账号（**首次登录后请立刻修改**）：
+
+| 用户 | 密码 | 说明 |
+|---|---|---|
+| `cat` | `temppwd` | 普通用户，在 `sudo` / `video` / `audio` 组 |
+| `root` | `root` | 超级用户 |
+
+串口参数：`115200 8N1`，控制台 `ttyFIQ0`。
+
+---
+
+## 4. 可选：GPU 硬件加速
+
+Kali 自带的 Mesa 配不上 Rockchip 的闭源 kbase 驱动，默认是 **CPU 软渲染**。
+需要加速时用 `GPU_STACK` 打开（`SOC` 决定用哪套闭源包）：
+
+```bash
+# RK3588（Mali-G610）：桌面 GL 加速 + 闭源 GLES/OpenCL 都装
+SOC=rk3588 GPU_STACK=both bash build/docker/build.sh
+
+# RK3576（Mali-G52）：闭源 GLES/OpenCL（该 SoC 的 blob 不含 Vulkan）
 SOC=rk3576 GPU_STACK=libmali bash build/docker/build.sh
 ```
 
-`SOC` 取值（环境变量 > `config/gpu-stack.conf` > `rk3588`）：
-
-| SOC | GPU | 架构 | libmali 包 | CSF 固件 | Vulkan |
-|---|---|---|---|---|---|
-| `rk3588` | Mali-G610 MP4 | Valhall / CSF | `libmali-valhall-g610-*` | 需要（本内核已内嵌） | ✅ |
-| `rk3576` | Mali-G52 MC3 | Bifrost / JM | `libmali-bifrost-g52-*` | **不需要** | ❌（该 blob 不含） |
-
-`GPU_STACK` 取值与优先级（环境变量 > `config/gpu-stack.conf` > `none`）：
-
-| 值 | 装什么 | 得到什么 | 代价 |
-|---|---|---|---|
-| `none`（默认） | 不装，Kali 官方 Mesa 26 | 无。GL 走 `llvmpipe` 软渲染（glmark2 ≈ 40） | 无 |
-| `panfork` | panfork mesa（PPA，23.x） | **X11 桌面 GL / glamor 硬件加速**（glmark2 ≈ 1000~1600） | mesa 家族降级到 23.x 并 hold；需联网拉 PPA + 从 Ubuntu jammy ports 补一个 `libllvm14` |
-| `libmali` | Rockchip 闭源 libmali（`packages/gpu/<SOC>/*.deb`） | GLES / EGL / OpenCL / 无 X 的 GBM 直出（`kmscube` 60fps）；Vulkan 仅 rk3588 有 | 桌面仍是软渲染（libmali 无桌面 GL） |
-| `both`（推荐） | 两者 | 桌面走 panfork，计算/无 X 场景按需走 libmali | 同上两者之和 |
-
-切换开关后建议增量构建，只会重跑 GPU 阶段：
-
-```bash
-INCREMENTAL=1 SOC=rk3576 GPU_STACK=both bash build/docker/build.sh
-```
-
-> 注意：`build-rootfs.sh` 的 firmware 阶段（拷贝 WiFi/BT 固件）**指纹只覆盖 `overlay-firmware/`
-> 的文件清单，不覆盖脚本正文**。所以如果你改了那一段的命令（或拉到了修过 `cp -r` 嵌套问题的版本），
-> 要先清掉该阶段标记让它重跑，否则增量构建会跳过、改动不生效：
-> `rm -f build/.build-state/stages/firmware.done build/.build-state/stages/firmware.fp`
-
-背景、两个必须避开的坑（libmali 的全局库注入会让 Xorg 崩溃、`mali-g610-firmware`
-的错版固件）、以及烧录后的验证方法，见
-[build/docker/README.md §7.7](build/docker/README.md) 与 [packages/gpu/README.md](packages/gpu/README.md)。
-
-### 2.8 产物与验证
-
-```bash
-ls -lh build/rootfs.img
-
-# 确认没有混入宿主 /dev 的设备节点（应只有 null / zero / random 等少数几个）
-sudo debugfs -R "ls -l /dev" build/rootfs.img 2>/dev/null | head -20
-
-# 确认构建期专用的 qemu 已删除
-sudo debugfs -R "stat /usr/bin/qemu-aarch64-static" build/rootfs.img 2>&1 | grep -i 'not found'
-
-# 文件系统健康度
-e2fsck -fn build/rootfs.img
-```
-
-烧写到根分区：
-
-```bash
-sudo dd if=build/rootfs.img of=/dev/mmcblk0pX bs=1M status=progress conv=fsync
-```
-
-### 2.9 常见问题
-
-| 现象 | 原因与处理 |
+| GPU_STACK | 得到什么 |
 |---|---|
-| `ERROR: 宿主机未注册 qemu-aarch64 binfmt` | x86_64 宿主没注册，回到 2.5 执行注册命令 |
-| `docker: invalid reference format` 或挂载路径报错 | 在 Git Bash 里跑了。改用 WSL2，或手动把 `$PWD` 换成 `//f/work/kali-rootfs` 这类形式 |
-| arm64 上构建特别慢 | 用了 `PLATFORM=linux/amd64`（或老版本脚本）导致退化成 x86_64 模拟；新版脚本按 `uname -m` 自动推导，不会出现 |
-| `Exec format error` | binfmt 注册未带 `F` 标志，用 `multiarch/qemu-user-static --reset -p yes` 重注册 |
-| `mkdir ... permission denied` / mount 失败 | 少了 `--privileged`（或对应的 cap 组合） |
-| `apt-get` 报 `403 Forbidden` / `No address associated with hostname` | 基础镜像默认源 `http.kali.org` 是 GeoIP 重定向，国内可能被分到清华/东软等镜像，IP 段被屏蔽就 403。**根因**：Kali 2026.2 起 APT 源改用 deb822 文件的 `/etc/apt/sources.list.d/kali.sources`，旧的 `/etc/apt/sources.list` 在镜像里**根本不存在** —— 只往后者写内容等于没换源，自带的那份依然生效。Dockerfile 已改为「先删 `sources.list.d` 里的既有定义，再写阿里云」。如需换其他源：`docker build --build-arg APT_MIRROR=https://mirrors.ustc.edu.cn/kali -t kali-rootfs-builder .`（中科大示例） |
-| 容器内看不到 `/proc/sys/fs/binfmt_misc` | 正常。binfmt_misc 是伪文件系统，**内容不跨 mount namespace 传播**，但**执行**不受影响（注册是内核全局状态）。entrypoint 只在「挂上后确认无条目」时才报错 |
-| `可用磁盘仅 xxx MB` 告警 | 至少留 20GB |
-| 想跳过构建直接重打包 img | `build/rootfs.img` 存在时 `build-rootfs.sh` 会短路跳过，只有 `mk-image.sh` 干活，等于重打包。反向操作（全量重建）用 `FORCE_REBUILD=1` |
-| 构建在 `apt-get`/`dpkg` 阶段报 `EUNATCH` / `Protocol driver not attached`，`dpkg` 返回 100 | 宿主内核 < 5.10，Kali-rolling 的 systemd 260+ 不兼容。升级内核到 ≥ 5.10（推荐 ≥ 5.14），或改用内核 6.8 的 CI 构建；`SKIP_KERNEL_CHECK=1` 可绕过入口预检（不推荐） |
+| `none`（默认） | 无加速，GL 走 llvmpipe |
+| `panfork` | **X11 桌面 GL / glamor 硬件加速**（唯一能给桌面加速的路线） |
+| `libmali` | GLES / EGL / OpenCL / 无 X 的 GBM 直出；桌面仍软渲染 |
+| `both` | 桌面走 panfork，计算按需走 libmali |
 
-### 2.10 相关文档
+取舍、验证方法与踩过的坑见 [packages/gpu/README.md](packages/gpu/README.md)。
+装完可在板上自检：
 
-- 容器方案的设计说明、容器适配细节、与裸机流程的对照：`build/docker/README.md`
+```bash
+sudo bash scripts/check-gpu.sh --bench          # 分层体检
+sudo bash scripts/panfork-verify.sh --verify    # 桌面 GL 验收
+sudo bash scripts/libmali-verify.sh --nodisp    # 闭源计算通路验收（不需要显示器）
+```
 
+---
+
+## 5. 目录结构
+
+```
+kali-rootfs/
+├── config/           板卡/打包参数、GPU 宏（gpu-stack.conf）
+├── overlay/          装进 rootfs 的配置文件（逐文件拷贝）
+├── overlay-firmware/ WiFi/BT 固件（构建期合并进 /usr/lib/firmware）
+├── packages/         额外 deb：arm64/（无条件安装）、gpu/<SOC>/
+├── scripts/          build-rootfs.sh + 板卡侧自检脚本
+├── build/            构建产物、打包脚本、firmware/（三件套放这里）
+├── docs/             细节文档
+└── Dockerfile        Docker 构建环境
+```
+
+---
+
+## 6. 文档索引
+
+| 文档 | 内容 |
+|---|---|
+| [build/docker/README.md](build/docker/README.md) | Docker 方案详解：前置条件、手动 build/run、`--privileged` 原因、容器适配、与裸机流程对照 |
+| [docs/native-build.md](docs/native-build.md) | 裸机编译：依赖逐项说明、增量构建、换内核/换 SoC、产物校验 |
+| [docs/pack-and-flash.md](docs/pack-and-flash.md) | 打包 update.img、分区布局、烧录、首启流程、默认账号 |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | 常见问题汇总（构建 / Docker / 打包 / 首启） |
+| [build/firmware/README.md](build/firmware/README.md) | 三件套从哪来、boot.img 与内核 modules 的同源约定 |
+| [packages/gpu/README.md](packages/gpu/README.md) | GPU 闭源包：选型、版本方向、两个 SoC 的能力差异 |
+
+---
+
+## 7. 高频问题
+
+| 现象 | 处理 |
+|---|---|
+| `mk-updateimg.sh` 报缺 `MiniLoaderAll.bin` / `uboot.img` / `boot.img` | 三件套没放，见 [build/firmware/README.md](build/firmware/README.md) |
+| 改了脚本但构建"什么都没做" | `build/rootfs.img` 已存在会短路；用 `FORCE_REBUILD=1` 或 `INCREMENTAL=1` |
+| 首次开机进桌面后又重启了一次 | **设计行为**（扩容后应用新分区表/DTB），第二次开机正常 |
+| 第二次开机卡在登录界面之前 / 黑屏 | 先确认 `boot.img` 与 `linux-image.deb` 是否同一次内核编译（模块与内核不匹配会卡在等待设备）；再看 [docs/troubleshooting.md](docs/troubleshooting.md) |
+
+更多问题（apt 403、`EUNATCH`、binfmt、磁盘不足、Git Bash 路径）见
+[docs/troubleshooting.md](docs/troubleshooting.md)。

@@ -38,6 +38,32 @@ cp rockdev/{MiniLoaderAll.bin,uboot.img,boot.img} ~/kali-rootfs/build/firmware/
 `KMOD_VER` 不再写死：`build-rootfs.sh` 从 `linux-image.deb` 里的 `lib/modules/<ver>/` 自动探测
 （探测不到才回退 `6.1.99-<SOC>`），所以换内核只需换 deb；`mk-updateimg.sh` 的芯片参数也跟随 `SOC`。
 
+## 内核 deb（`overlay/usr/local/linux-image.deb`）从哪来
+
+内核源码：<https://github.com/LubanCat/kernel>。**它必须与 `boot.img` 出自同一棵树、同一次编译。**
+
+两种产出方式：
+
+```bash
+# 方式 1：在 SDK 里构建内核（会顺带产出 deb，通常在 rockdev/ 或 extboot/kerneldeb/）
+cd ~/LubanCat_SDK && ./build.sh kernel
+
+# 方式 2：在内核源码树里直接打包（会同时产出 headers / libc-dev，只需要 image 那个）
+make KDEB_COMPRESS=xz bindeb-pkg
+```
+
+拷进仓库时统一改名：
+
+```bash
+cp <linux-image-*.deb> overlay/usr/local/linux-image.deb
+```
+
+先确认它真的带 modules（否则镜像里 `/lib/modules` 会是空的）：
+
+```bash
+dpkg-deb -c overlay/usr/local/linux-image.deb | grep 'lib/modules/.*/modules.dep'
+```
+
 ## ⚠ boot.img 与内核 modules 必须同一次编译
 
 `boot.img` 是 /boot 分区镜像（ext2）：内含内核 `Image-<ver>`、`dtb/`、`uEnv/`、boot.scr，

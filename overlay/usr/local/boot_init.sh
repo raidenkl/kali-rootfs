@@ -17,7 +17,74 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 trap 'echo "[boot_init] FAILED at line ${LINENO}" >/dev/console 2>&1 || true' ERR
 
 board_info() {
-	if [[ "$2" == "rk3566" ||  "$2" == "rk3568" ]]; then
+	if [[ "$2" == "rk3128" ]]; then
+		case $1 in
+			0000)
+				BOARD_NAME='LubanCat-0H'
+				BOARD_DTB='rk3128-lubancat-0h.dtb'
+				BOARD_uEnv='uEnvLubanCat0H.txt'
+				;;
+			*)
+				echo "Device ID Error !!!"
+				BOARD_NAME='LubanCat-RK3128'
+				BOARD_DTB='rk3128-lubancat-generic.dtb'
+				BOARD_uEnv='uEnvLubanCat.txt'
+				;;
+		esac
+	elif [[ "$2" == "rk3528" ||  "$2" == "rk3528a" ]]; then
+		case $1 in
+			0001)
+				BOARD_NAME='LubanCat-Q1'
+				BOARD_DTB='rk3528-lubancat-q1.dtb'
+				BOARD_uEnv='uEnvLubanCatQ1.txt'
+				;;
+			0002)
+				BOARD_NAME='LubanCat-Q1IO'
+				BOARD_DTB='rk3528-lubancat-q1io.dtb'
+				BOARD_uEnv='uEnvLubanCatQ1IO.txt'
+				;;
+			0007)
+				BOARD_NAME='LubanCat-Q1IO-test'
+				BOARD_DTB='rk3528-lubancat-q1io-test.dtb'
+				BOARD_uEnv='uEnvLubanCatQ1IO-test.txt'
+				;;
+			*)
+				echo "Device ID Error !!!"
+				BOARD_NAME='LubanCat-RK3528'
+				BOARD_DTB='rk3528-lubancat-generic.dtb'
+				BOARD_uEnv='uEnvLubanCat.txt'
+				;;
+		esac
+	elif [[ "$2" == "rk3562" ]]; then
+		case $1 in
+			0000)
+				BOARD_NAME='LubanCat-1HS'
+				BOARD_DTB='rk3562-lubancat-1hs.dtb'
+				BOARD_uEnv='uEnvLubanCat1HS.txt'
+				;;
+			0007)
+				BOARD_NAME='LubanCat-1HS-test'
+				BOARD_DTB='rk3562-lubancat-1hs-test.dtb'
+				BOARD_uEnv='uEnvLubanCat1HS-test.txt'
+				;;
+			0100)
+				BOARD_NAME='LubanCat-1HSI'
+				BOARD_DTB='rk3562-lubancat-1hs.dtb'
+				BOARD_uEnv='uEnvLubanCat1HS.txt'
+				;;
+			0107)
+				BOARD_NAME='LubanCat-1HS-test'
+				BOARD_DTB='rk3562-lubancat-1hs-test.dtb'
+				BOARD_uEnv='uEnvLubanCat1HS-test.txt'
+				;;
+			*)
+				echo "Device ID Error !!!"
+				BOARD_NAME='LubanCat-RK3562'
+				BOARD_DTB='rk3562-lubancat-generic.dtb'
+				BOARD_uEnv='uEnvLubanCat.txt'
+				;;
+		esac
+	elif [[ "$2" == "rk3566" ||  "$2" == "rk3568" ]]; then
 		case $1 in
 			0000)
 				BOARD_NAME='LubanCat-1'
@@ -127,6 +194,40 @@ board_info() {
 				BOARD_uEnv='uEnvLubanCat.txt'
 				;;
 		esac
+	elif [[ "$2" == "rk3576" ]]; then
+		case $1 in
+			0000)
+				BOARD_NAME='LubanCat-3'
+				BOARD_DTB='rk3576-lubancat-3.dtb'
+				BOARD_uEnv='uEnvLubanCat3.txt'
+				;;
+			0001)
+				BOARD_NAME='LubanCat-3IO'
+				BOARD_DTB='rk3576-lubancat-3io.dtb'
+				BOARD_uEnv='uEnvLubanCat3IO.txt'
+				;;
+			0007)
+				BOARD_NAME='LubanCat-3IO-test'
+				BOARD_DTB='rk3576-lubancat-3io-test.dtb'
+				BOARD_uEnv='uEnvLubanCat3IO-test.txt'
+				;;
+			0100)
+				BOARD_NAME='LubanCat-3 v2'
+				BOARD_DTB='rk3576-lubancat-3-v2.dtb'
+				BOARD_uEnv='uEnvLubanCat3-V2.txt'
+				;;
+			0707)
+				BOARD_NAME='LubanCat-3-ddr-emmc-test'
+				BOARD_DTB='rk3576-lubancat-3-ddr-emmc-test.dtb'
+				BOARD_uEnv='uEnvLubanCat3-ddr-emmc-test.txt'
+				;;
+			*)
+				echo "Device ID Error !!!"
+				BOARD_NAME='LubanCat-RK3576'
+				BOARD_DTB='rk3576-lubancat-generic.dtb'
+				BOARD_uEnv='uEnvLubanCat.txt'
+				;;
+		esac
 	elif [[ "$2" == "rk3588" ||  "$2" == "rk3588s" ]]; then
 			case $1 in
 			0101)
@@ -161,19 +262,24 @@ board_info() {
 				;;
 			0501)
 				BOARD_NAME='LubanCat-5IOF'
-				BOARD_DTB='rk3588-lubancat-5io.dtb'
-				BOARD_uEnv='uEnvLubanCat5IO.txt'
+				BOARD_DTB='rk3588-lubancat-5iof.dtb'
+				BOARD_uEnv='uEnvLubanCat5IOF.txt'
 				;;
 			0601)
 				BOARD_NAME='LubanCat-5IOB'
-				BOARD_DTB='rk3588-lubancat-5io.dtb'
-				BOARD_uEnv='uEnvLubanCat5IO.txt'
+				BOARD_DTB='rk3588-lubancat-5iob.dtb'
+				BOARD_uEnv='uEnvLubanCat5IOB.txt'
 				;;
-            0701)
-                BOARD_NAME='LubanCat-5IOBI'
-                BOARD_DTB='rk3588-lubancat-5ioi.dtb'
-                BOARD_uEnv='uEnvLubanCat5IO.txt'
-                ;;
+			0701)
+				BOARD_NAME='LubanCat-5IOBI'
+				BOARD_DTB='rk3588-lubancat-5iobi.dtb'
+				BOARD_uEnv='uEnvLubanCat5IOB.txt'
+				;;
+			0001)
+				BOARD_NAME='LubanCat-5IOFI'
+				BOARD_DTB='rk3588-lubancat-5iofi.dtb'
+				BOARD_uEnv='uEnvLubanCat5IOF.txt'
+				;;
 			*)
 				echo "Device ID Error !!!"
 				BOARD_NAME='LubanCat-RK3588'
@@ -270,9 +376,16 @@ if [ ! -e "/boot/boot_init" ] ; then
 		# apt install -fy --allow-downgrades /boot/kerneldeb/* || true
 		# apt-mark hold linux-headers-$(uname -r) linux-image-$(uname -r) || true
 
-		echo "[boot_init] select dtb/uEnv: $BOARD_DTB / $BOARD_uEnv"
-		ln -sf dtb/$BOARD_DTB /boot/rk-kernel.dtb
-		ln -sf $BOARD_uEnv /boot/uEnv/uEnv.txt
+		# SOC 不在 board_info 覆盖范围内时 BOARD_DTB/BOARD_uEnv 为空，
+		# 直接 ln -sf 会在 set -eE 下中止整个首启流程（连扩容都跑不到）。
+		# 这种情况下保留 boot.img 自带的那份 dtb/uEnv，只写标记。
+		if [ -n "$BOARD_DTB" ] && [ -n "$BOARD_uEnv" ]; then
+			echo "[boot_init] select dtb/uEnv: $BOARD_DTB / $BOARD_uEnv"
+			ln -sf dtb/$BOARD_DTB /boot/rk-kernel.dtb
+			ln -sf $BOARD_uEnv /boot/uEnv/uEnv.txt
+		else
+			echo "[boot_init] WARN: board not recognized (soc=$SOC_type id=$BOARD_ID), keep dtb/uEnv from boot.img"
+		fi
 
 		touch /boot/boot_init
 		rm -f /boot/kerneldeb/*
