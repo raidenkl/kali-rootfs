@@ -80,4 +80,4 @@ Docker 方案的设计细节、`--privileged` 的逐项原因、与裸机流程�
 | 根分区没扩到整块盘（`df -h /` 只有镜像的 6 G 左右，SD 卡启动时尤其明显） | 旧版脚本把根分区写死成 `/dev/mmcblk0p3`、磁盘写死成 `/dev/mmcblk0`：从 SD 卡启动时根其实是 `/dev/mmcblk1p3`（`mmcblk0` 是板载 eMMC），于是拿 eMMC 的数字做判断、甚至去扩 eMMC，正在用的 SD 卡永远不扩 | 当前脚本已按 `findmnt -no SOURCE /` + `lsblk` 推出真实的磁盘与分区号。旧镜像临时补救：`sudo rm -f /boot/boot_dilatation_init && sudo reboot`，或直接 `sudo resize2fs $(findmnt -no SOURCE /)`（分区本身已占满整盘时这一条就够） |
 | 登录后没有网络 | NetworkManager 未托管 / 未配置 | `nmcli device status`；`nmtui` 配置 |
 
-串口是排查首启问题最有效的手段：`115200 8N1`，控制台 `ttyFIQ0`。
+串口是排查首启问题最有效的手段：`1500000 8N1`，控制台 `ttyFIQ0`。

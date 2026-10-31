@@ -115,7 +115,7 @@ bash mk-updateimg.sh rk3588 emmc      # 用法：mk-updateimg.sh <chip> <storage
 | `cat` | `temppwd` | 普通用户，在 `sudo` / `video` / `audio` 组 |
 | `root` | `root` | 超级用户 |
 
-串口参数 `115200 8N1`，控制台是 `ttyFIQ0`。
+串口参数 `1500000 8N1`，控制台是 `ttyFIQ0`。
 
 ---
 

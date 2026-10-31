@@ -108,7 +108,7 @@ build/update.img          ← RKDevTool 直接选这个
 `mmcblk1p3` / `mmcblk1`（此时 `mmcblk0` 是板载 eMMC，不能碰）。拿到之后仍是原来那套流程：
 `sgdisk -e` → `growpart` → `partx -u` → `resize2fs`，执行前先比一次分区大小与文件系统大小，已占满就跳过。
 
-串口：`115200 8N1`，控制台 `ttyFIQ0`。所有首启动作都会以 `[boot_init]` 前缀打印，
+串口：`1500000 8N1`，控制台 `ttyFIQ0`。所有首启动作都会以 `[boot_init]` 前缀打印，
 失败时会打印 `[boot_init] FAILED at line N`。
 
 ---
