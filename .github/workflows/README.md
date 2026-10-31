@@ -57,7 +57,7 @@ runner 开机时预装了本项目的无关内容，占掉约 50GB：
 |---|---|
 | `push` 到 master/main（改动构建相关文件） | 双架构构建，不上传产物 |
 | `pull_request` 到 master/main | 同上 |
-| 手动 `workflow_dispatch` | 可选板卡、是否打包 img、是否上传产物 |
+| 手动 `workflow_dispatch` | 可选 SoC、是否打包 img、是否上传产物（develop 等分支只能手动触发） |
 
 改动这些路径会触发（避免改 README 也跑一次 90 分钟的构建）：
 
@@ -72,7 +72,7 @@ GitHub 仓库 → Actions → Build Kali Rootfs → Run workflow，可填：
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `board` | `lubancat-4` | 5 个板卡可选 |
+| `soc` | `rk3588` | `rk3588` / `rk3576` / `rk356x`（构建期只按 SoC 分类，具体板卡由首启 ADC 识别） |
 | `upload_artifact` | `false` | 上传产物（压成 xz，注意配额） |
 | `run_mk_image` | `true` | 是否执行 mk-image.sh |
 
@@ -246,14 +246,16 @@ docker run --rm \
 
 ### 镜像源说明（易误解）
 
-`build-rootfs.sh` 第 37 行配的是 **阿里云** `mirrors.aliyun.com/kali/`，但
-**Dockerfile 阶段 `apt-get update` 用的是镜像基础自带的官方源**
-（`kali.download` / `http.kali.org`）。
+`build-rootfs.sh` 第 37 行配的是 **阿里云** `mirrors.aliyun.com/kali/`（作用于
+`debootstrap` 与 chroot 内的 apt）；**Dockerfile 阶段**装依赖用的是 `ARG APT_MIRROR`，
+默认也是阿里云，本 workflow 显式传同值只是为了在构建日志里看得见。
 
-两者互不影响：阿里云只作用于 `debootstrap`（脚本第 53/58 行）。
+两者互不影响。
 
-> GitHub runner 在海外，**官方源反而更快**，所以不要为了「加速」去改 Dockerfile 的源。
-> 阿里云那行只有在国内本地调试时才体现优势。本次 Dockerfile 阶段约 27 秒完成，无需优化。
+> **不要传 `https://http.kali.org/kali`**：那是 GeoIP 重定向，apt 每次请求可能
+> 落到不同镜像站，2026-10-31 分到 `kali.darklab.sh` 时 TLS 直接报
+> `tlsv1 unrecognized name`，`docker build` 退出码 100。阿里云在 runner 上是通的，
+> 不必为了「海外更快」切回官方源。
 
 ---
 

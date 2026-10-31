@@ -35,8 +35,17 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #  清华/东软等教育网镜像。部分网络会被镜像站 403（IP 段屏蔽）或解析失败，
 #  导致 docker build 阶段 apt-get install 直接挂掉。
 #
-#  默认改用阿里云源。海外构建（如 GitHub Actions）可覆盖回官方源：
-#      docker build --build-arg APT_MIRROR=https://http.kali.org/kali .
+#  固定用阿里云源，本地和 CI 一致（GitHub Actions 里也是它，实测可达）。
+#  要换源用 --build-arg 覆盖，例如：
+#      docker build --build-arg APT_MIRROR=<另一个具体镜像站> .
+#
+#  ★ 不要用 https://http.kali.org/kali —— 它是 GeoIP 重定向服务，apt 每个
+#    请求会被 302 到不同的镜像站。2026-10-31 的 Actions 就是这样挂的：
+#    一部分包被分到 kali.darklab.sh（104.161.46.133），那个站点的 TLS 证书
+#    与 SNI 不匹配，apt 报
+#        SSL connection failed: error:0A000458:SSL routines::tlsv1 unrecognized name
+#    随后 E: Failed to fetch 若干个包，apt 退出码 100，docker build 直接失败。
+#    阿里云是直连镜像、不做重定向，不会出现「同一次构建里一部分包走坏站点」。
 #
 #  ★★ 为什么不能只写 /etc/apt/sources.list（踩过两次的坑）
 #
@@ -72,6 +81,8 @@ RUN set -eux; \
     rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; \
     KEYRING=/usr/share/keyrings/kali-archive-keyring.gpg; \
     if [ -f "$KEYRING" ]; then SIGNED="Signed-By: $KEYRING"; else SIGNED="Trusted: yes"; fi; \
+    printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' \
+        > /etc/apt/apt.conf.d/99-retries; \
     printf 'Types: deb\nURIs: http://mirrors.aliyun.com/kali\nSuites: kali-rolling\nComponents: main contrib non-free non-free-firmware\n%s\n' "$SIGNED" \
         > /etc/apt/sources.list.d/kali.sources; \
     apt-get update; \

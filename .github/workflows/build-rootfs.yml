@@ -43,17 +43,15 @@ on:
       - '.github/workflows/build-rootfs.yml'
   workflow_dispatch:
     inputs:
-      board:
-        description: '板卡'
+      soc:
+        description: '目标 SoC'
         required: true
-        default: 'lubancat-4'
+        default: 'rk3588'
         type: choice
         options:
-          - lubancat-4
-          - lubancat-4io
-          - lubancat-5
-          - lubancat-5io
-          - lubancat-5-v2
+          - rk3588
+          - rk3576
+          - rk356x
       upload_artifact:
         description: '上传产物（占用大量存储，谨慎开启）'
         required: true
@@ -67,12 +65,13 @@ on:
 
 # 同一分支后推的 run 取消先推的，避免浪费 runner
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.inputs.board || 'lubancat-4' }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.inputs.soc || 'rk3588' }}
   cancel-in-progress: true
 
 env:
   IMAGE_TAG: kali-rootfs-builder:ci
-  BOARD: ${{ github.event.inputs.board || 'lubancat-4' }}
+  # BOARD 已从构建侧删除（构建期只按 SOC 分类），这里改成 SOC
+  SOC: ${{ github.event.inputs.soc || 'rk3588' }}
 
 jobs:
   # ===========================================================================
@@ -217,11 +216,16 @@ jobs:
         run: |
           set -o pipefail
           echo ">>> docker build（宿主架构 $(uname -m)）"
-          # APT_MIRROR：runner 在海外，覆盖回 kali 官方 GeoIP 源（本地默认阿里云，
-          # 见 Dockerfile 的 APT_MIRROR 注释 —— 两边各用最快的源）
+          # APT_MIRROR：与 Dockerfile 默认值一致，固定阿里云（这里显式写出来，
+          # 构建参数在日志里一眼可见）。
+          # 不要用 https://http.kali.org/kali：它是 GeoIP 重定向，apt 每个请求会被
+          # 302 到不同镜像站，2026-10-31 有一批包分到 kali.darklab.sh（TLS 报
+          # tlsv1 unrecognized name）导致 docker build 退出码 100。
+          # 阿里云在 runner 上是通的：同一份日志里 InRelease 与 21.8 MB 的
+          # Packages 都是一两秒拉完，ca-certificates 也正常装上。
           docker build \
             --file Dockerfile \
-            --build-arg APT_MIRROR=https://http.kali.org/kali \
+            --build-arg APT_MIRROR=https://mirrors.aliyun.com/kali \
             --tag "${IMAGE_TAG}" \
             --progress plain \
             . 2>&1 | tee /tmp/docker-build.log
@@ -273,7 +277,7 @@ jobs:
         id: build
         run: |
           set -o pipefail
-          echo ">>> 开始构建（板卡: ${BOARD}，宿主架构: $(uname -m)）"
+          echo ">>> 开始构建（SoC: ${SOC}，宿主架构: $(uname -m)）"
           echo ">>> arm64 原生约 40~70 分钟 / x86_64 交叉约 90~180 分钟，请耐心等待"
           echo ""
           START=$(date +%s)
@@ -284,7 +288,7 @@ jobs:
             --privileged \
             -v "${GITHUB_WORKSPACE}":/work/kali-rootfs \
             -w /work/kali-rootfs \
-            -e BOARD="${BOARD}" \
+            -e SOC="${SOC}" \
             -e FORCE_REBUILD=1 \
             "${IMAGE_TAG}" 2>&1 | tee /tmp/rootfs-build.log
 
@@ -441,7 +445,7 @@ jobs:
           if [ -f build/rootfs.img ]; then
             echo ">>> 压缩 rootfs.img（xz -3 -T0，压缩后通常 <2GB）"
             xz -3 -T0 -k build/rootfs.img
-            mv build/rootfs.img.xz "dist/rootfs-${BOARD}-${{ matrix.label }}.img.xz"
+            mv build/rootfs.img.xz "dist/rootfs-${SOC}-${{ matrix.label }}.img.xz"
             rm -f build/rootfs.img
             echo ""
             echo "=== 压缩结果 ==="
@@ -455,7 +459,7 @@ jobs:
         if: always() && github.event.inputs.upload_artifact == 'true' && steps.build.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: kali-rootfs-${{ matrix.label }}-${{ env.BOARD }}
+          name: kali-rootfs-${{ matrix.label }}-${{ env.SOC }}
           path: dist/
           retention-days: 7
           compression-level: 0

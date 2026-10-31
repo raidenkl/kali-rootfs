@@ -46,7 +46,8 @@
 | `docker: invalid reference format` / 挂载路径报错 | 在 Windows Git Bash 里跑了，`F:\` 被路径转换 | 改用 WSL2；或手动把 `$PWD` 写成 `//f/work/kali-rootfs` |
 | `mkdir ... permission denied` / mount 失败 | 少了 `--privileged`（或对应 cap） | 加 `--privileged`；收紧方案见 [docker/README §三](../build/docker/README.md) |
 | 容器内看不到 `/proc/sys/fs/binfmt_misc` | 它是伪文件系统，内容不跨 namespace 传播 | **正常**：执行不受影响，判定以宿主机为准 |
-| `docker build` 卡在 apt / 403 | 基础镜像默认源是 `http.kali.org`（GeoIP） | 默认已换阿里云；海外可 `docker build --build-arg APT_MIRROR=https://http.kali.org/kali .` |
+| `docker build` 卡在 apt / 403 | 基础镜像默认源是 `http.kali.org`（GeoIP） | 已固定阿里云；要换源用 `--build-arg APT_MIRROR=<具体镜像站>` |
+| `docker build` 报 `SSL connection failed: ... tlsv1 unrecognized name`，随后 `E: Failed to fetch`、退出码 100 | 用的是 `http.kali.org` 这种 GeoIP 重定向源，apt 被 302 到证书/SNI 有问题的镜像站（2026-10-31 实测分到 `kali.darklab.sh`） | 固定到直接镜像：`--build-arg APT_MIRROR=https://mirrors.aliyun.com/kali`（workflow 与 Dockerfile 默认值都已是它）；Dockerfile 另配了 `Acquire::Retries=5` |
 | 想跳过构建只重打包 img | `rootfs.img` 存在时 `build-rootfs.sh` 会短路 | 只跑 `cd build && bash mk-image.sh rootfs` |
 
 Docker 方案的设计细节、`--privileged` 的逐项原因、与裸机流程的差异，见

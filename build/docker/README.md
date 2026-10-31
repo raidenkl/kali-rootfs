@@ -374,13 +374,20 @@ Dockerfile 里的依赖清单是从「两个脚本实际调用了什么」反推
 
 | 层 | 源 | 谁决定 | 覆盖方式 |
 |---|---|---|---|
-| **镜像构建期**（Dockerfile 里 apt 装依赖） | 默认阿里云 `mirrors.aliyun.com/kali` | Dockerfile 的 `ARG APT_MIRROR` | `docker build --build-arg APT_MIRROR=https://http.kali.org/kali .`（CI 海外用这个） |
+| **镜像构建期**（Dockerfile 里 apt 装依赖） | 阿里云 `mirrors.aliyun.com/kali`（固定，本地与 CI 一致） | Dockerfile 的 `ARG APT_MIRROR` | `docker build --build-arg APT_MIRROR=<具体镜像站> .` |
 | **rootfs 构建期**（debootstrap + chroot 内 apt） | 阿里云 `mirrors.aliyun.com/kali/` | `build-rootfs.sh` 第 37 行 `mirror=` 变量 | 改脚本或挂载后 sed（国内速度尚可；海外慢） |
 
 > 为什么镜像构建期不直接用 `http.kali.org`：它是 GeoIP 重定向，国内可能被分到
 > 清华/东软等镜像，存在整段 IP 被 403 屏蔽、或镜像站 DNS 解析失败的情况，
 > 会直接导致 `docker build` 失败（真实案例见 [`docs/troubleshooting.md`](../../docs/troubleshooting.md#2-构建-rootfs裸机--docker-公共)）。
-> 阿里云源对国内稳定；CI 传 build-arg 切回官方源即可，两边各用最快的。
+> CI 也用阿里云，不再为「海外更快」切回官方源 —— runner 上实测它是通的：
+> 同一份构建日志里 `InRelease` 与 21.8 MB 的 `Packages` 都是一两秒拉完。
+>
+> **★ 别用 `http.kali.org`**：它是 GeoIP 重定向，apt 每个请求会被 302 到不同
+> 镜像站。2026-10-31 GitHub Actions 就挂在这上面 —— 一部分包分到
+> `kali.darklab.sh`，该站 TLS 报 `error:0A000458:SSL routines::tlsv1 unrecognized
+> name`，`apt-get install` 退出码 100。阿里云是直连镜像，不会出现这种「同一次
+> 构建里一部分包走坏站点」的情况。
 >
 > **★ 换源时必须连 deb822 文件一起处理**：Kali 2026.2 起 APT 源放在
 > `/etc/apt/sources.list.d/kali.sources`（deb822 格式），而 `/etc/apt/sources.list`
