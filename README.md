@@ -77,6 +77,20 @@ cd build && bash mk-image.sh rootfs
 
 老教程里的 `python2` 别照抄，kali-rolling 早删了这个包，装只会报错；`qemu-user-static` 也别装，Debian 已删包、也不再建 `-static` 软链。每项依赖的作用、增量构建、换源、产物校验，都在 [docs/native-build.md](docs/native-build.md)。
 
+常用参数（写环境变量或直接用命令行开关，两者等价）：
+
+```bash
+sudo INCREMENTAL=1 bash scripts/build-rootfs.sh                  # 增量：复用已完成的重型阶段
+sudo FORCE_REBUILD=1 bash scripts/build-rootfs.sh                # 从零全量重建（连阶段状态一起清）
+sudo APT_REFRESH=1 INCREMENTAL=1 bash scripts/build-rootfs.sh    # 增量模式下也重跑 apt，拉最新包
+sudo SOC=rk3576 GPU_STACK=libmali bash scripts/build-rootfs.sh   # 换 SoC、预装 GPU 驱动
+sudo bash scripts/build-rootfs.sh --incremental                  # 等价写法，另有 --force / --apt-refresh
+```
+
+增量模式只重跑廉价的定制阶段（overlay 拷贝、服务使能、配置覆写），所以改完 `overlay/` 里的东西，几十秒就能拿到新的 rootfs 目录树。阶段完成情况记在 `build/.build-state/`，删掉它等于回到全量。
+
+`SOC` 决定取哪份 libmali 包、以及打包时的 chip 参数；`GPU_STACK` 见第 4 节。内核 modules 的版本目录（`KMOD_VER`）默认从 deb 的 `lib/modules/` 自动探测，探测不到才回退到 `6.1.99-<SOC>`，一般不用手动指定。
+
 ---
 
 ## 2. 打包成 update.img
