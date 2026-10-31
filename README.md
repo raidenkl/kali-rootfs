@@ -1,4 +1,4 @@
-# Kali Linux rootfs（LubanCat / RK3588 · RK3576）
+# Kali Linux rootfs（LubanCat）
 
 用 `debootstrap` 做一套 Kali Linux arm64 rootfs，再打包成 RKDevTool 能直接烧的 `update.img`。整个过程三个脚本串联，产物逐级叠加：
 
@@ -27,7 +27,7 @@ build/mk-updateimg.sh    →  build/update.img   整包（loader + uboot + boot 
 
 ## 1. 构建 rootfs
 
-两种方式任选，产物完全一样。首次全量构建大约 40~90 分钟，看网络和宿主架构；之后打 `rootfs.img` 再花 5~15 分钟。
+两种方式任选，产物完全一样。首次全量构建大约40到90分钟，看网络和宿主架构；之后打包 `rootfs.img` 再花5到15分钟。
 
 ### 方式一：Docker（推荐，环境零配置）
 
