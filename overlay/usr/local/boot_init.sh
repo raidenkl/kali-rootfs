@@ -356,18 +356,26 @@ echo "[boot_init] checking first-boot state ..."
 if [ ! -e "/boot/boot_init" ] ; then
 	if [ ! -e "/dev/disk/by-partlabel/userdata" ] ; then
 		if [ ! -L "/boot/rk-kernel.dtb" ] ; then
-			for x in $(cat /proc/cmdline); do
-				case $x in
-				root=*)
-					Root_Part=${x#root=}
-					Boot_Part="${Root_Part::-2}"p2
-					;;
-				esac
-			done
+			#/boot 分区在 parameter.txt 里固定叫 boot，用 PARTLABEL 取即可。
+			#写死 /dev/mmcblk0p2 在 SD 卡启动（根是 mmcblk1）或换介质时会挂错/挂不上。
+			Boot_Part=/dev/disk/by-partlabel/boot
+			if [ ! -e "$Boot_Part" ]; then
+				for x in $(cat /proc/cmdline); do
+					case $x in
+					root=*)
+						Root_Part=${x#root=}
+						Boot_Part="${Root_Part::-2}"p2
+						;;
+					esac
+				done
+			fi
 
 			echo "[boot_init] mount $Boot_Part -> /boot"
 			mount "$Boot_Part" /boot
-			echo "$Boot_Part  /boot  auto  defaults  0 2" >> /etc/fstab
+			#fstab 同样用 PARTLABEL：同一份镜像写到 eMMC(mmcblk0) 或 SD(mmcblk1)
+			#都能挂上，写死设备名必有一边失败
+			grep -qE '^[^#]*[[:space:]]/boot[[:space:]]' /etc/fstab \
+				|| echo "PARTLABEL=boot  /boot  auto  defaults  0 2" >> /etc/fstab
 			echo "[boot_init] /boot fstab entry added"
 		fi
 
@@ -403,10 +411,39 @@ fi
 if [ ! -e "/boot/boot_dilatation_init" ] ;
    then
 
+   #根设备按实际启动介质取，不写死 /dev/mmcblk0：SD 卡启动时根是 /dev/mmcblk1p3
+   #（mmcblk0 是板载 eMMC），只有从 eMMC 启动时才是 mmcblk0p3。
+   Root_Part="$(findmnt -no SOURCE / 2>/dev/null || true)"
+   case $Root_Part in
+      /dev/mmcblk*p[0-9]*|/dev/sd[a-z][0-9]*|/dev/nvme[0-9]*p[0-9]*)
+         ;;
+      *)
+         #findmnt 给不出设备节点（比如 /dev/root）时退回 cmdline 的 root=
+         for x in $(cat /proc/cmdline); do
+            case $x in
+            root=*)
+               Root_Part=${x#root=}
+               ;;
+            esac
+         done
+         ;;
+   esac
+   [ -b "$Root_Part" ] || Root_Part=/dev/mmcblk0p3
+
+   Root_Disk="$(lsblk -no PKNAME "$Root_Part" 2>/dev/null | head -1)"
+   if [ -n "$Root_Disk" ]; then
+      Root_Disk=/dev/$Root_Disk
+   else
+      Root_Disk=${Root_Part%p*}
+   fi
+   Root_Part_Num="$(lsblk -no PARTN "$Root_Part" 2>/dev/null | head -1)"
+   [ -n "$Root_Part_Num" ] || Root_Part_Num=${Root_Part##*p}
+   echo "[boot_init] root=$Root_Part disk=$Root_Disk part=$Root_Part_Num"
+
    #先判断是否需要扩容：文件系统已占满分区就整段跳过，
    #避免在运行中的根盘上做不必要的分区表操作
-   PART_BYTES="$(blockdev --getsize64 /dev/mmcblk0p3 2>/dev/null || echo 0)"
-   FS_BYTES="$(dumpe2fs -h /dev/mmcblk0p3 2>/dev/null | awk -F: '/Block count/{c=$2} /Block size/{s=$2} END{print c*s}')"
+   PART_BYTES="$(blockdev --getsize64 "$Root_Part" 2>/dev/null || echo 0)"
+   FS_BYTES="$(dumpe2fs -h "$Root_Part" 2>/dev/null | awk -F: '/Block count/{c=$2} /Block size/{s=$2} END{print c*s}')"
    echo "[boot_init] partition=${PART_BYTES:-0} bytes, filesystem=${FS_BYTES:-unknown} bytes"
 
    NEED_RESIZE=1
@@ -417,23 +454,23 @@ if [ ! -e "/boot/boot_dilatation_init" ] ;
 
    if [ "${NEED_RESIZE}" = "1" ]; then
       #转换MBR -> GPT分区表（失败不致命）
-      sgdisk -e /dev/mmcblk0 || true
+      sgdisk -e "$Root_Disk" || true
 
       #扩展根分区：优先 growpart（非交互、支持在线分区），退化为 parted -s。
       #原来的 printf|parted ---pretend-input-tty 会被部分 parted 版本拒绝
       #（"Error: Invalid number."），非零返回被 set -e 捕获后脚本直接退出，
       #导致 resize2fs / touch / reboot 全部执行不到。
       if command -v growpart >/dev/null 2>&1; then
-         growpart /dev/mmcblk0 3 || parted -s /dev/mmcblk0 resizepart 3 100% || true
+         growpart "$Root_Disk" "$Root_Part_Num" || parted -s "$Root_Disk" resizepart "$Root_Part_Num" 100% || true
       else
-         parted -s /dev/mmcblk0 resizepart 3 100% || true
+         parted -s "$Root_Disk" resizepart "$Root_Part_Num" 100% || true
       fi
 
       #刷新内核分区表：只作用于具体分区，避免全盘重读
-      partx -u /dev/mmcblk0p3 2>/dev/null || partprobe /dev/mmcblk0 2>/dev/null || true
+      partx -u "$Root_Part" 2>/dev/null || partprobe "$Root_Disk" 2>/dev/null || true
 
       #根据配置重新分配空间
-      resize2fs /dev/mmcblk0p3 || true
+      resize2fs "$Root_Part" || true
    fi
 
 	#创建判断文件，第二次启动存在该文件不再执行此扩容

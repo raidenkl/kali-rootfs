@@ -96,12 +96,17 @@ build/update.img          ← RKDevTool 直接选这个
      ├─ 选择对应 DTB（/boot/rk-kernel.dtb）与 uEnv（/boot/uEnv/uEnv.txt）
      ├─ 挂载 /boot 并写入 fstab（必要时）
      ├─ 写标记 /boot/boot_init
-     ├─ growpart + resize2fs 把 p3 扩到整块存储
+     ├─ 按真实根设备（eMMC 是 mmcblk0、SD 卡是 mmcblk1）扩容 p3
      ├─ 写标记 /boot/boot_dilatation_init
      └─ systemctl --no-block reboot        ← 自动重启
  └─ 第二次启动
      └─ 正常进入 lightdm 登录界面
 ```
+
+扩容这一段不写死设备名，而是用 `findmnt -no SOURCE /` 找当前根分区、再用 `lsblk`
+拿到所在磁盘和分区号：从 eMMC 启动得到 `mmcblk0p3` / `mmcblk0`，从 SD 卡启动得到
+`mmcblk1p3` / `mmcblk1`（此时 `mmcblk0` 是板载 eMMC，不能碰）。拿到之后仍是原来那套流程：
+`sgdisk -e` → `growpart` → `partx -u` → `resize2fs`，执行前先比一次分区大小与文件系统大小，已占满就跳过。
 
 串口：`115200 8N1`，控制台 `ttyFIQ0`。所有首启动作都会以 `[boot_init]` 前缀打印，
 失败时会打印 `[boot_init] FAILED at line N`。

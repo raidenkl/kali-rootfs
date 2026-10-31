@@ -77,7 +77,7 @@ Docker 方案的设计细节、`--privileged` 的逐项原因、与裸机流程�
 | 桌面能起但非常卡（`glamor initialization failed` / `Refusing to try glamor on llvmpipe`） | `GPU_STACK=libmali` 或 `none` 的镜像没有可用的硬件 GL：libmali 不提供 GLX 且缺 `GL_EXT_blend_func_extended`，Debian 的 xserver 又拒绝用 llvmpipe 跑 glamor | 这是预期行为。要桌面硬件加速用 `GPU_STACK=both`（panfork 负责 X11/glamor，libmali 负责 GLES/OpenCL/Vulkan） |
 | 装了 panfork、重启 lightdm 后直接黑屏，Xorg 日志 `Caught signal 6 (Aborted)` | **panfork 的 pan_base UAPI 与内核 kbase DDK 不匹配**：`ioctl(KBASE_IOCTL_MEM_JIT_INIT): Cannot allocate memory` → 驱动 `double free` → abort。Bifrost/JM（rk3576 G52）上实测必现；rk3588 的 CSF/Valhall 路径不受影响 | `sudo bash panfork-verify.sh --rollback` 后 `systemctl restart lightdm`。**回滚必须显式给版本号**（PPA 带 epoch，apt 认为 panfork 版"更新"，`--allow-downgrades` 也会静默跳过）。G52 上就别折腾 panfork 了，GPU 走 libmali 的 GLES/EGL |
 | 没有 WiFi / 蓝牙 | `/usr/lib/firmware` 被多嵌了一层（`firmware/firmware/aic8800/...`） | 检查镜像里有没有 `/usr/lib/firmware/firmware`；旧版本构建问题，重建即可 |
-| 根分区没扩到整块 eMMC | `growpart` 失败，或 `/boot/boot_dilatation_init` 被误建 | 删掉该标记后重启；或手动 `growpart /dev/mmcblk0 3 && resize2fs /dev/mmcblk0p3` |
+| 根分区没扩到整块盘（`df -h /` 只有镜像的 6 G 左右，SD 卡启动时尤其明显） | 旧版脚本把根分区写死成 `/dev/mmcblk0p3`、磁盘写死成 `/dev/mmcblk0`：从 SD 卡启动时根其实是 `/dev/mmcblk1p3`（`mmcblk0` 是板载 eMMC），于是拿 eMMC 的数字做判断、甚至去扩 eMMC，正在用的 SD 卡永远不扩 | 当前脚本已按 `findmnt -no SOURCE /` + `lsblk` 推出真实的磁盘与分区号。旧镜像临时补救：`sudo rm -f /boot/boot_dilatation_init && sudo reboot`，或直接 `sudo resize2fs $(findmnt -no SOURCE /)`（分区本身已占满整盘时这一条就够） |
 | 登录后没有网络 | NetworkManager 未托管 / 未配置 | `nmcli device status`；`nmtui` 配置 |
 
 串口是排查首启问题最有效的手段：`115200 8N1`，控制台 `ttyFIQ0`。
