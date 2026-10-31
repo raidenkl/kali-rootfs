@@ -887,6 +887,11 @@ chroot ${chroot_dir} /bin/bash -c "systemctl enable chrony"
 # configure ssh
 chroot ${chroot_dir} /bin/bash -c "systemctl enable ssh"
 
+# 蓝牙：bluez 装了但 debootstrap 流程下不会自动 enable，导致板子上 hci0 有、
+# bluetoothd 不起（`systemctl is-enabled bluetooth` = disabled）。这里补上。
+chroot ${chroot_dir} /bin/bash -c "systemctl enable bluetooth" \
+        || echo "!! 启用 bluetooth.service 失败（bluez 未安装？）—— 蓝牙将需要手动 systemctl enable"
+
 
 # Umount temporary API filesystems
 umount -lf ${chroot_dir}/dev/pts 2> /dev/null || true
