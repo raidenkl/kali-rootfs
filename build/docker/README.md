@@ -113,8 +113,8 @@ build/rootfs.img         # 可直接 dd 的 ext4 根分区镜像
 ### 常用变体
 
 ```bash
-# 换板卡
-BOARD=lubancat-5 bash build/docker/build.sh
+# 换 SoC（rk3588 默认；rk3576 / rk356x）
+SOC=rk3576 bash build/docker/build.sh
 
 # 不重建镜像（改脚本后不需要重建，因为仓库是挂载的）
 REBUILD=0 bash build/docker/build.sh

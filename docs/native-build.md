@@ -142,14 +142,26 @@ INCREMENTAL=1 sudo bash scripts/build-rootfs.sh
 但 **`build/firmware/boot.img` 必须换成同一次编译的产物**，否则会出现"内核与模块/DTB 不匹配"，
 详见 [../build/firmware/README.md](../build/firmware/README.md)。
 
-### 换 SoC（RK3576）
+### 换 SoC（RK3576 / RK3566·RK3568）
 
 ```bash
+# RK3576（Mali-G52 MC3）
 SOC=rk3576 GPU_STACK=libmali INCREMENTAL=1 sudo bash scripts/build-rootfs.sh
+
+# RK3566 / RK3568（Mali-G52 2EE）—— 统一写 rk356x
+SOC=rk356x GPU_STACK=libmali INCREMENTAL=1 sudo bash scripts/build-rootfs.sh
 ```
 
 `SOC` 会影响：`packages/gpu/<SOC>/` 取哪个 libmali、是否需要 CSF 固件、`mk-updateimg.sh` 用哪个芯片参数。
-同时 `build/firmware/` 三件套也要换成 RK3576 的。
+同时 `build/firmware/` 三件套也要换成目标 SoC 的，`overlay/usr/local/linux-image.deb` 也要换成该 SoC 的内核 deb。
+
+> **rk356x 的 GPU 用户态不用单独移植**：rk3566/rk3568 与 rk3576 是同一颗 Mali-G52（Bifrost/JM），
+> libmali 按「GPU 家族 + DDK 版本」命名 → `packages/gpu/rk356x/` 为空时脚本自动复用
+> `packages/gpu/rk3576/` 的 `libmali-bifrost-g52-g24p0-*`。要换别的 DDK 版本才需要往 `rk356x/` 里放包。
+>
+> **但内核侧必须匹配**：这三颗都是 kbase（`/dev/mali0`），务必确认
+> `dmesg` 里的 `Kernel DDK version` **不高于** blob 的 `g24p0`（DDK 可高于 mali-so，反之不行）。
+> 若 rk356x 的 BSP 内核 DDK 更老（如 `g18p0`），要换成对应的老 blob，否则 EGL 初始化会失败。
 
 > **首启的板卡识别（`board_info()`）已覆盖全系**：`rk3128` / `rk3528(3528a)` / `rk3562` /
 > `rk3566·rk3568` / `rk3576` / `rk3588·rk3588s`，按 ADC 得到的板卡 ID 查表选 DTB 与 uEnv。

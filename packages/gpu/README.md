@@ -9,8 +9,14 @@
 ```
 packages/gpu/
 ├── rk3588/   Mali-G610 MP4（Valhall / CSF）→ libmali-valhall-g610-*
-└── rk3576/   Mali-G52 MC3（Bifrost / JM）  → libmali-bifrost-g52-*
+├── rk3576/   Mali-G52 MC3（Bifrost / JM）  → libmali-bifrost-g52-*
+└── rk356x/   rk3566/rk3568 的 Mali-G52 2EE（Bifrost / JM）→ **复用 rk3576 那份**
 ```
+
+> `rk356x` 目录**可以为空**：libmali 按「GPU 家族 + DDK 版本」命名、不按 SoC，
+> rk3566/rk3568 与 rk3576 是同族 Bifrost/G52，所以 `build-rootfs.sh` 在
+> `packages/gpu/rk356x/` 下找不到 deb 时会自动回退到 `packages/gpu/rk3576/`。
+> 想给这两个 SoC 单独用别的包（比如换 DDK 版本），把 deb 放进 `rk356x/` 即可覆盖。
 
 构建时按 `SOC` 只取 `packages/gpu/<SOC>/*.deb`。**不要跨目录混放**：
 所有 libmali 包都声明 `Provides/Conflicts/Replaces: libmali`，同一系统只能装一份；
@@ -20,6 +26,7 @@ packages/gpu/
 |---|---|---|---|
 | `rk3588` | `libmali-valhall-g610-g24p0-x11-gbm_1.9-1_arm64.deb` | 19,228,008 B | Valhall，含 Vulkan ICD |
 | `rk3576` | `libmali-bifrost-g52-g24p0-x11-wayland-gbm_1.9-1_arm64.deb` | 18,561,892 B | Bifrost，**不含 Vulkan**，无 CSF 固件 |
+| `rk356x` | 同上（复用 `rk3576/`） | — | rk3566/rk3568 同族 Bifrost/G52；同样不含 Vulkan、无 CSF 固件 |
 
 来源：<https://github.com/rockchip-linux/libmali> 的 arm64 发行包（`Maintainer: Putin Lee
 <putin.li@rock-chips.com>`、`Provides/Conflicts/Replaces: libmali`）。可复现来源：

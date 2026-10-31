@@ -21,7 +21,6 @@ set -eE
 trap 'echo "Error: in $0 on line $LINENO" >&2' ERR
 
 REPO="${REPO:-/work/kali-rootfs}"
-BOARD="${BOARD:-lubancat-4}"
 FORCE_REBUILD="${FORCE_REBUILD:-0}"
 SKIP_KERNEL_CHECK="${SKIP_KERNEL_CHECK:-0}"
 
@@ -82,13 +81,18 @@ log "[自检] 运行环境"
 [ -f "$REPO/build/mk-image.sh" ] || die "$REPO/build/mk-image.sh 不存在"
 
 echo "    仓库      : $REPO"
-echo "    板卡      : $BOARD"
 echo "    内核      : $(uname -r) / $(uname -m)"
 echo "    GPU 驱动栈: $GPU_STACK（none|panfork|libmali|both，来源: 环境变量或 config/gpu-stack.conf）"
 echo "    目标 SoC  : $SOC"
 if [ "$GPU_STACK" = "libmali" ] || [ "$GPU_STACK" = "both" ]; then
-    if ! ls "$REPO"/packages/gpu/"$SOC"/*.deb >/dev/null 2>&1; then
-        warn "GPU_STACK=$GPU_STACK 需要 packages/gpu/$SOC/*.deb，但该目录是空的 —— libmali 会被跳过（见 packages/gpu/README.md）"
+    gpu_dir="$REPO/packages/gpu/$SOC"
+    # rk356x（rk3566/rk3568）与 rk3576 同族（bifrost-g52）：目录为空时
+    # build-rootfs.sh 会自动回退到 rk3576，这里保持一致，免得误报"没有 deb"。
+    if ! ls "$gpu_dir"/*.deb >/dev/null 2>&1 && [ "$SOC" = "rk356x" ]; then
+        ls "$REPO"/packages/gpu/rk3576/*.deb >/dev/null 2>&1 && gpu_dir="$REPO/packages/gpu/rk3576"
+    fi
+    if ! ls "$gpu_dir"/*.deb >/dev/null 2>&1; then
+        warn "GPU_STACK=$GPU_STACK 需要 $gpu_dir/*.deb，但该目录是空的 —— libmali 会被跳过（见 packages/gpu/README.md）"
     fi
 fi
 

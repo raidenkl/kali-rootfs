@@ -10,7 +10,6 @@
 #      bash build/docker/build.sh                    # 完整流程
 #      REBUILD=0 bash build/docker/build.sh          # 不重建镜像，直接跑
 #      FORCE_REBUILD=1 bash build/docker/build.sh    # 忽略 rootfs.img 强制全量重建
-#      BOARD=lubancat-5 bash build/docker/build.sh   # 换板卡
 #      GPU_STACK=both bash build/docker/build.sh     # 预装 GPU 驱动栈（见下）
 #      SOC=rk3576 GPU_STACK=libmali bash build/docker/build.sh  # 换 SoC（默认 rk3588）
 #      SKIP_KERNEL_CHECK=1 bash build/docker/build.sh  # 跳过宿主内核预检（不推荐）
@@ -18,6 +17,7 @@
 #  SOC（默认 rk3588，也可写进 config/gpu-stack.conf）：
 #      rk3588    Mali-G610（Valhall/CSF）→ libmali-valhall-g610-*，需要 CSF 固件
 #      rk3576    Mali-G52（Bifrost/JM）  → libmali-bifrost-g52-*，无 CSF 固件
+#      rk356x    rk3566/rk3568 的 Mali-G52 2EE，与 rk3576 同族 → 复用 libmali-bifrost-g52-*
 #
 #  GPU_STACK（默认 none，也可写进 config/gpu-stack.conf 免得每次带）：
 #      none      不装，Kali 官方 Mesa（GL 走 llvmpipe 软渲染）
@@ -45,7 +45,6 @@ case "$(uname -m)" in
 esac
 PLATFORM="${PLATFORM:-${DEFAULT_PLATFORM}}"
 REBUILD="${REBUILD:-1}"
-BOARD="${BOARD:-lubancat-4}"
 FORCE_REBUILD="${FORCE_REBUILD:-0}"
 INTERACTIVE="${INTERACTIVE:-1}"
 EXTRA_RUN_ARGS="${EXTRA_RUN_ARGS:-}"
@@ -168,8 +167,7 @@ echo "==============================================================="
 echo " Kali rootfs 薄容器构建"
 echo "   镜像     : ${IMAGE}"
 echo "   平台     : ${PLATFORM}（宿主 $(uname -m)，可覆盖 PLATFORM）"
-echo "   板卡     : ${BOARD}"
-echo "   SoC      : ${SOC}（rk3588|rk3576，可覆盖 SOC）"
+echo "   SoC      : ${SOC}（rk3588|rk3576|rk356x，可覆盖 SOC）"
 echo "   GPU 栈   : ${GPU_STACK}（none|panfork|libmali|both，可覆盖 GPU_STACK）"
 echo "   重建镜像 : ${REBUILD}"
 echo "   强制重建 : ${FORCE_REBUILD}"
@@ -210,7 +208,6 @@ docker run --rm \
     ${EXTRA_RUN_ARGS} \
     -v "${REPO_ROOT}":/work/kali-rootfs \
     -w /work/kali-rootfs \
-    -e BOARD="${BOARD}" \
     -e FORCE_REBUILD="${FORCE_REBUILD}" \
     -e SKIP_KERNEL_CHECK="${SKIP_KERNEL_CHECK}" \
     -e GPU_STACK="${GPU_STACK}" \

@@ -107,7 +107,8 @@ SOC="${SOC:-rk3588}"
 case "${SOC}" in
         rk3588) SOC_FAMILY=valhall; SOC_CSF_FW=1 ;;
         rk3576) SOC_FAMILY=bifrost; SOC_CSF_FW=0 ;;
-        *) echo "SOC=${SOC} 无效（可选 rk3588|rk3576）"; exit 1 ;;
+        rk356x) SOC_FAMILY=bifrost; SOC_CSF_FW=0 ;;
+        *) echo "SOC=${SOC} 无效（可选 rk3588|rk3576|rk356x）"; exit 1 ;;
 esac
 case "${GPU_FAMILY:-unknown}" in
         valhall|bifrost) ;;
@@ -118,6 +119,16 @@ case "${NEEDS_CSF_FW:-}" in
         *) NEEDS_CSF_FW="${SOC_CSF_FW}" ;;
 esac
 GPU_DIR=../packages/gpu/${SOC}
+# rk356x（rk3566/rk3568）与 rk3576 是同一颗 Mali-G52（Bifrost/JM）。Rockchip 的 libmali
+# 按"GPU 家族 + DDK 版本"命名、不按 SoC → packages/gpu/rk356x/ 为空时直接复用 rk3576 那份，
+# 避免仓库里重复放同一个 18MB 的 deb。要单独用别的包，就在 rk356x/ 里放一份即可。
+if [[ ${SOC} == "rk356x" ]]; then
+        rk356x_debs=$(ls -1 ../packages/gpu/rk356x/*.deb 2>/dev/null | wc -l)
+        if [[ ${rk356x_debs} -eq 0 && -d ../packages/gpu/rk3576 ]]; then
+                GPU_DIR=../packages/gpu/rk3576
+                echo "$(mode_of) packages/gpu/rk356x/ 下没有 deb → 复用 packages/gpu/rk3576/（同为 bifrost-g52）"
+        fi
+fi
 export GPU_STACK SOC GPU_FAMILY NEEDS_CSF_FW   # chroot 子进程要读它们（chroot 继承环境）
 echo "$(mode_of) GPU 驱动栈: GPU_STACK=${GPU_STACK}  SOC=${SOC}  GPU_FAMILY=${GPU_FAMILY}  CSF_FW=${NEEDS_CSF_FW}"
 
@@ -687,6 +698,21 @@ chroot ${chroot_dir} /bin/bash -c "systemctl enable boot_init"
 # 注意：本阶段指纹只含 deb 的大小/时间，不含本段脚本正文 —— 改了下面命令后
 # 必须 rm -f ${STAGE_DIR}/kmod.* 才会重跑（与 firmware 阶段同一惯例）。
 KMOD_DEB="${overlay_dir}/usr/local/linux-image.deb"
+# 一致性检查：deb 的包名应含当前 SOC 的标识。换 SoC 时最常见的事故就是
+# "三件套换了、这个 deb 忘了换"（或反过来），到板上才发现模块与内核对不上。
+if [[ -f ${KMOD_DEB} ]]; then
+        KMOD_PKG="$(dpkg-deb -f "${KMOD_DEB}" Package 2>/dev/null || true)"
+        case "${SOC}" in
+                rk3588) SOC_PAT="rk3588" ;;
+                rk3576) SOC_PAT="rk3576" ;;
+                rk356x) SOC_PAT="rk356" ;;   # 覆盖 rk3566 / rk3568 / rk356x
+                *)      SOC_PAT="" ;;
+        esac
+        if [[ -n ${SOC_PAT} && -n ${KMOD_PKG} && ${KMOD_PKG} != *${SOC_PAT}* ]]; then
+                echo "$(mode_of) [WARN] 内核 deb 与 SOC 不匹配：deb 是 ${KMOD_PKG}，当前 SOC=${SOC}"
+                echo "        换 SoC 时 overlay/usr/local/linux-image.deb 也要一起换（见 build/firmware/README.md）"
+        fi
+fi
 # 内核 release 串：优先环境变量 KMOD_VER；否则从 deb 里的 lib/modules/<ver>/ 探测；
 # 探测不到再退回按 SoC 的默认值。这样换 rk3576 内核时不用改脚本。
 if [[ -z ${KMOD_VER:-} ]]; then
